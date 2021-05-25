@@ -7,10 +7,10 @@ presubmits:
       preset-service-account: "true"
     spec:
       containers:
-      - image: gcr.io/cloud-builders/bazel	
+      - image: gcr.io/cloud-builders/bazel
         command:
         - "bazel"
-        args:  
+        args:
         - "test"
         - "..."
         volumeMounts:
@@ -19,6 +19,9 @@ presubmits:
       volumes:
       - name: empty-workspace
         emptyDir: {}
+    annotations:
+      testgrid-dashboards: presubmits-misc
+      testgrid-num-columns-recent: '30'
 postsubmits:
   GoogleCloudPlatform/k8s-cluster-bundle:
   - name: post-k8s-cluster-bundle-bazel-test
@@ -27,10 +30,10 @@ postsubmits:
       preset-service-account: "true"
     spec:
       containers:
-      - image: gcr.io/cloud-builders/bazel	
+      - image: gcr.io/cloud-builders/bazel
         command:
         - "bazel"
-        args: 
+        args:
         - "test"
         - "..."
         volumeMounts:
@@ -39,3 +42,5 @@ postsubmits:
       volumes:
       - name: empty-workspace
         emptyDir: {}
+    annotations:
+      testgrid-dashboards: presubmits-misc

@@ -1,31 +1,26 @@
-import {FuzzySearch} from './fuzzy-search';
-import {Job, JobState, JobType} from "../api/prow";
 import moment from "moment";
+import {ProwJob, ProwJobList, ProwJobState, ProwJobType, Pull} from "../api/prow";
+import {cell, icon} from "../common/common";
+import {getParameterByName, relativeURL} from "../common/urls";
+import {FuzzySearch} from './fuzzy-search';
+import {JobHistogram, JobSample} from './histogram';
 
-
-declare const allBuilds: Job[];
+declare const allBuilds: ProwJobList;
 declare const spyglass: boolean;
+declare const rerunCreatesJob: boolean;
+declare const csrfToken: string;
 
-// http://stackoverflow.com/a/5158301/3694
-function getParameterByName(name: string): string | null {
-    const match = RegExp('[?&]' + name + '=([^&/]*)').exec(
-        window.location.search);
-    return match && decodeURIComponent(match[1].replace(/\+/g, ' '));
+function genShortRefKey(baseRef: string, pulls: Pull[] = []) {
+    return [baseRef, ...pulls.map((p) => p.number)].filter((n) => n).join(",");
 }
 
-function updateQueryStringParameter(uri: string, key: string,
-                                    value: string): string {
-    const re = new RegExp("([?&])" + key + "=.*?(&|$)", "i");
-    const separator = uri.indexOf('?') !== -1 ? "&" : "?";
-    if (uri.match(re)) {
-        return uri.replace(re, '$1' + key + "=" + value + '$2');
-    } else {
-        return uri + separator + key + "=" + value;
-    }
-}
-
-function shortenBuildRefs(buildRef: string): string {
-    return buildRef && buildRef.replace(/:[0-9a-f]*/g, '');
+function genLongRefKey(baseRef: string, baseSha: string, pulls: Pull[] = []) {
+    return [
+        [baseRef, baseSha].filter((n) => n).join(":"),
+        ...pulls.map((p) => [p.number, p.sha].filter((n) => n).join(":")),
+    ]
+      .filter((n) => n)
+      .join(",");
 }
 
 interface RepoOptions {
@@ -36,31 +31,51 @@ interface RepoOptions {
     pulls: {[key: string]: boolean};
     batches: {[key: string]: boolean};
     states: {[key: string]: boolean};
+    clusters: {[key: string]: boolean};
 }
 
-function optionsForRepo(repo: string): RepoOptions {
+function optionsForRepo(repository: string): RepoOptions {
     const opts: RepoOptions = {
-        types: {},
-        repos: {},
-        jobs: {},
         authors: {},
-        pulls: {},
         batches: {},
+        clusters: {},
+        jobs: {},
+        pulls: {},
+        repos: {},
         states: {},
+        types: {},
     };
 
-    for (let i = 0; i < allBuilds.length; i++) {
-        const build = allBuilds[i];
-        opts.types[build.type] = true;
-        opts.repos[build.repo] = true;
-        if (!repo || repo === build.repo) {
-            opts.jobs[build.job] = true;
-            opts.states[build.state] = true;
-            if (build.type === "presubmit") {
-                opts.authors[build.author] = true;
-                opts.pulls[build.number] = true;
-            } else if (build.type === "batch") {
-                opts.batches[shortenBuildRefs(build.refs)] = true;
+    for (const build of allBuilds.items) {
+        const {
+            spec: {
+                cluster = "",
+                type = "",
+                job = "",
+                refs: {
+                    org = "", repo = "", pulls = [], base_ref = "",
+                } = {},
+            },
+            status: {
+                state = "",
+            },
+        } = build;
+
+        opts.types[type] = true;
+        opts.clusters[cluster] = true;
+        const repoKey = `${org}/${repo}`;
+        if (repoKey) {
+            opts.repos[repoKey] = true;
+        }
+        if (!repository || repository === repoKey) {
+            opts.jobs[job] = true;
+            opts.states[state] = true;
+
+            if (type === "presubmit" && pulls.length) {
+                opts.authors[pulls[0].author] = true;
+                opts.pulls[pulls[0].number] = true;
+            } else if (type === "batch") {
+                opts.batches[genShortRefKey(base_ref, pulls)] = true;
             }
         }
     }
@@ -70,10 +85,8 @@ function optionsForRepo(repo: string): RepoOptions {
 
 function redrawOptions(fz: FuzzySearch, opts: RepoOptions) {
     const ts = Object.keys(opts.types).sort();
-    const selectedType = addOptions(ts, "type") as JobType;
-    const rs = Object.keys(opts.repos).filter(function (r) {
-        return r !== "/";
-    }).sort();
+    const selectedType = addOptions(ts, "type") as ProwJobType;
+    const rs = Object.keys(opts.repos).filter((r) => r !== "/").sort();
     addOptions(rs, "repo");
     const js = Object.keys(opts.jobs).sort();
     const jobInput = document.getElementById("job-input") as HTMLInputElement;
@@ -86,15 +99,15 @@ function redrawOptions(fz: FuzzySearch, opts: RepoOptions) {
         opts.pulls = opts.batches;
     }
     if (selectedType !== "periodic" && selectedType !== "postsubmit") {
-        const ps = Object.keys(opts.pulls).sort(function (a, b) {
-            return parseInt(a) - parseInt(b);
-        });
+        const ps = Object.keys(opts.pulls).sort((a, b) => Number(a) - Number(b));
         addOptions(ps, "pull");
     } else {
         addOptions([], "pull");
     }
     const ss = Object.keys(opts.states).sort();
     addOptions(ss, "state");
+    const cs = Object.keys(opts.clusters).sort();
+    addOptions(cs, "cluster");
 }
 
 function adjustScroll(el: Element): void {
@@ -180,9 +193,9 @@ function handleUpKey(): void {
     adjustScroll(previousSibling);
 }
 
-window.onload = function(): void {
+window.onload = (): void => {
     const topNavigator = document.getElementById("top-navigator")!;
-    let navigatorTimeOut: number | undefined;
+    let navigatorTimeOut: any;
     const main = document.querySelector("main")! as HTMLElement;
     main.onscroll = () => {
         topNavigator.classList.add("hidden");
@@ -211,14 +224,14 @@ window.onload = function(): void {
     // Register selection on change functions
     const filterBox = document.getElementById("filter-box")!;
     const options = filterBox.querySelectorAll("select")!;
-    options.forEach(opt => {
+    options.forEach((opt) => {
         opt.onchange = () => {
             redraw(fz);
         };
     });
     // Attach job status bar on click
     const stateFilter = document.getElementById("state")! as HTMLSelectElement;
-    document.querySelectorAll(".job-bar-state").forEach(jb => {
+    document.querySelectorAll(".job-bar-state").forEach((jb) => {
         const state = jb.id.slice("job-bar-".length);
         if (state === "unknown") {
             return;
@@ -228,13 +241,45 @@ window.onload = function(): void {
             stateFilter.onchange!.call(stateFilter, new Event("change"));
         });
     });
+    // Attach job histogram on click to scroll the selected build into view
+    const jobHistogram = document.getElementById("job-histogram-content") as HTMLTableSectionElement;
+    jobHistogram.addEventListener("click", (event) => {
+        const target = event.target as HTMLElement;
+        if (target == null) {
+            return;
+        }
+        if (!target.classList.contains('active')) {
+            return;
+        }
+        const row = target.dataset.sampleRow;
+        if (row == null || row.length === 0) {
+            return;
+        }
+        const rowNumber = Number(row);
+        const builds = document.getElementById("builds")!.getElementsByTagName("tbody")[0];
+        if (builds == null || rowNumber >= builds.childNodes.length) {
+            return;
+        }
+        const targetRow = builds.childNodes[rowNumber] as HTMLTableRowElement;
+        targetRow.scrollIntoView();
+    });
+    window.addEventListener("popstate", () => {
+        const optsPopped = optionsForRepo("");
+        const fzPopped = initFuzzySearch(
+            "job",
+            "job-input",
+            "job-list",
+            Object.keys(optsPopped.jobs).sort());
+        redrawOptions(fzPopped, optsPopped);
+        redraw(fzPopped, false);
+    });
     // set dropdown based on options from query string
     const opts = optionsForRepo("");
     const fz = initFuzzySearch(
         "job",
         "job-input",
         "job-list",
-        Object.keys(opts["jobs"]).sort());
+        Object.keys(opts.jobs).sort());
     redrawOptions(fz, opts);
     redraw(fz);
 };
@@ -244,7 +289,7 @@ function displayFuzzySearchResult(el: HTMLElement, inputContainer: ClientRect | 
     el.style.top = inputContainer.height - 1 + "px";
     el.style.width = inputContainer.width + "px";
     el.style.height = 200 + "px";
-    el.style.zIndex = "9999"
+    el.style.zIndex = "9999";
 }
 
 function fuzzySearch(fz: FuzzySearch, id: string, list: HTMLElement, input: HTMLInputElement): void {
@@ -285,9 +330,7 @@ function registerFuzzySearchHandler(fz: FuzzySearch, id: string, list: HTMLEleme
         } else if (validToken(event.keyCode)) {
             // Delay 1 frame that the input character is recorded before getting
             // input value
-            setTimeout(function () {
-                fuzzySearch(fz, id, list, input);
-            }, 32);
+            setTimeout(() => fuzzySearch(fz, id, list, input), 32);
         }
     });
 }
@@ -311,22 +354,22 @@ function initFuzzySearch(id: string, inputId: string, listId: string,
 }
 
 function registerJobResultEventHandler(fz: FuzzySearch, li: HTMLElement, input: HTMLInputElement) {
-    li.addEventListener("mousedown", function (event) {
+    li.addEventListener("mousedown", (event) => {
         input.value = (event.currentTarget as HTMLElement).innerHTML;
         redraw(fz);
     });
-    li.addEventListener("mouseover", function (event) {
+    li.addEventListener("mouseover", (event) => {
         const selectedJobs = document.getElementsByClassName("job-selected");
         if (!selectedJobs) {
             return;
         }
 
-        for (let i = 0; i < selectedJobs.length; i++) {
-            selectedJobs[i].classList.remove("job-selected");
+        for (const job of Array.from(selectedJobs)) {
+            job.classList.remove("job-selected");
         }
         (event.currentTarget as HTMLElement).classList.add("job-selected");
     });
-    li.addEventListener("mouseout", function (event) {
+    li.addEventListener("mouseout", (event) => {
         (event.currentTarget as HTMLElement).classList.remove("job-selected");
     });
 }
@@ -341,24 +384,24 @@ function addOptionFuzzySearch(fz: FuzzySearch, data: string[], id: string,
         list.removeChild(list.firstChild);
     }
     list.scrollTop = 0;
-    for (let i = 0; i < data.length; i++) {
+    for (const datum of data) {
         const li = document.createElement("li");
-        li.innerHTML = data[i];
+        li.innerHTML = datum;
         registerJobResultEventHandler(fz, li, input);
         list.appendChild(li);
     }
 }
 
-function addOptions(options: string[], selectID: string): string | null {
+function addOptions(options: string[], selectID: string): string | undefined {
     const sel = document.getElementById(selectID)! as HTMLSelectElement;
     while (sel.length > 1) {
         sel.removeChild(sel.lastChild!);
     }
     const param = getParameterByName(selectID);
-    for (let i = 0; i < options.length; i++) {
+    for (const option of options) {
         const o = document.createElement("option");
-        o.text = options[i];
-        if (param && options[i] === param) {
+        o.text = option;
+        if (param && option === param) {
             o.selected = true;
         }
         sel.appendChild(o);
@@ -367,22 +410,32 @@ function addOptions(options: string[], selectID: string): string | null {
 }
 
 function selectionText(sel: HTMLSelectElement): string {
-    return sel.selectedIndex == 0 ? "" : sel.options[sel.selectedIndex].text;
+    return sel.selectedIndex === 0 ? "" : sel.options[sel.selectedIndex].text;
 }
 
 function equalSelected(sel: string, t: string): boolean {
-    return sel === "" || sel == t;
+    return sel === "" || sel === t;
 }
 
-function groupKey(build: Job): string {
-    return build.repo + " " + build.number + " " + build.refs;
+function groupKey(build: ProwJob): string {
+    const {refs: {repo = "", pulls = [], base_ref = "", base_sha = ""} = {}} = build.spec;
+    const pr = pulls.length ? pulls[0].number : 0;
+    return `${repo} ${pr} ${genLongRefKey(base_ref, base_sha, pulls)}`;
 }
 
-function redraw(fz: FuzzySearch): void {
+// escapeRegexLiteral ensures the given string is escaped so that it is treated as
+// an exact value when used within a RegExp. This is the standard substitution recommended
+// by https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide/Regular_Expressions.
+function escapeRegexLiteral(s: string): string {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function redraw(fz: FuzzySearch, pushState: boolean = true): void {
+    const rerunStatus = getParameterByName("rerun");
     const modal = document.getElementById('rerun')!;
-    const rerun_command = document.getElementById('rerun-content')!;
-    window.onclick = function (event) {
-        if (event.target == modal) {
+    const rerunCommand = document.getElementById('rerun-content')!;
+    window.onclick = (event: any) => {
+        if (event.target === modal) {
             modal.style.display = "none";
         }
     };
@@ -396,33 +449,35 @@ function redraw(fz: FuzzySearch): void {
 
     function getSelection(name: string): string {
         const sel = selectionText(document.getElementById(name) as HTMLSelectElement);
-        if (sel && opts && !opts[name + 's' as keyof RepoOptions][sel]) {
+        if (sel && name !== 'repo' && !opts[name + 's' as keyof RepoOptions][sel]) {
             return "";
         }
         if (sel !== "") {
-            args.push(name + "=" + encodeURIComponent(sel));
+            args.push(`${name}=${encodeURIComponent(sel)}`);
         }
         return sel;
     }
 
-    function getSelectionFuzzySearch(id: string, inputId: string): string {
+    function getSelectionFuzzySearch(id: string, inputId: string): RegExp {
         const input = document.getElementById(inputId) as HTMLInputElement;
         const inputText = input.value;
-        if (inputText !== "" && opts && !opts[id + 's' as keyof RepoOptions][inputText]) {
-            return "";
+        if (inputText === "") {
+            return new RegExp('');
         }
         if (inputText !== "") {
-            args.push(id + "=" + encodeURIComponent(
-                inputText));
+            args.push(`${id}=${encodeURIComponent(inputText)}`);
         }
-
-        return inputText;
+        if (inputText !== "" && opts[id + 's' as keyof RepoOptions][inputText]) {
+            return new RegExp(`^${escapeRegexLiteral(inputText)}$`);
+        }
+        const expr = inputText.split('*').map(escapeRegexLiteral);
+        return new RegExp(`^${expr.join('.*')}$`);
     }
 
     const repoSel = getSelection("repo");
     const opts = optionsForRepo(repoSel);
 
-    const typeSel = getSelection("type") as JobType;
+    const typeSel = getSelection("type") as ProwJobType;
     if (typeSel === "batch") {
         opts.pulls = opts.batches;
     }
@@ -430,183 +485,258 @@ function redraw(fz: FuzzySearch): void {
     const authorSel = getSelection("author");
     const jobSel = getSelectionFuzzySearch("job", "job-input");
     const stateSel = getSelection("state");
+    const clusterSel = getSelection("cluster");
 
-    if (window.history && window.history.replaceState !== undefined) {
+    if (pushState && window.history && window.history.pushState !== undefined) {
         if (args.length > 0) {
-            history.replaceState(null, "", "/?" + args.join('&'));
+            history.pushState(null, "", "/?" + args.join('&'));
         } else {
-            history.replaceState(null, "", "/")
+            history.pushState(null, "", "/");
         }
     }
     fz.setDict(Object.keys(opts.jobs));
     redrawOptions(fz, opts);
 
     let lastKey = '';
-    const jobCountMap = new Map() as Map<JobState, number>;
+    const jobCountMap = new Map() as Map<ProwJobState, number>;
+    const jobInterval: Array<[number, number]> = [[3600 * 3, 0], [3600 * 12, 0], [3600 * 48, 0]];
+    let currentInterval = 0;
+    const jobHistogram = new JobHistogram();
+    const now = Date.now() / 1000;
     let totalJob = 0;
-    for (let i = 0; i < allBuilds.length; i++) {
-        const build = allBuilds[i];
-        if (!equalSelected(typeSel, build.type)) {
+    let displayedJob = 0;
+
+    for (let i = 0; i < allBuilds.items.length; i++) {
+        const build = allBuilds.items[i];
+        const {
+            metadata: {
+                name: prowJobName = "",
+            },
+            spec: {
+                cluster = "",
+                type = "",
+                job = "",
+                agent = "",
+                refs: {repo_link = "", base_sha = "", base_link = "", pulls = [], base_ref = ""} = {},
+                pod_spec,
+            },
+            status: {startTime, completionTime = "", state = "", pod_name, build_id = "", url = ""},
+        } = build;
+
+        let org = "";
+        let repo = "";
+        if (build.spec.refs !== undefined) {
+            org = build.spec.refs.org;
+            repo = build.spec.refs.repo;
+        } else if (build.spec.extra_refs !== undefined && build.spec.extra_refs.length > 0 ) {
+            org = build.spec.extra_refs[0].org;
+            repo = build.spec.extra_refs[0].repo;
+        }
+
+        if (!equalSelected(typeSel, type)) {
             continue;
         }
-        if (!equalSelected(repoSel, build.repo)) {
+        if (!equalSelected(repoSel, `${org}/${repo}`)) {
             continue;
         }
-        if (!equalSelected(stateSel, build.state)) {
+        if (!equalSelected(stateSel, state)) {
             continue;
         }
-        if (!equalSelected(jobSel, build.job)) {
+        if (!equalSelected(clusterSel, cluster)) {
             continue;
         }
-        if (build.type === "presubmit") {
-            if (!equalSelected(pullSel, build.number.toString())) {
+        if (!jobSel.test(job)) {
+            continue;
+        }
+        if (type === "presubmit" && pulls.length) {
+            const {number: prNumber, author} = pulls[0];
+
+            if (!equalSelected(pullSel, prNumber.toString())) {
                 continue;
             }
-            if (!equalSelected(authorSel, build.author)) {
+            if (!equalSelected(authorSel, author)) {
                 continue;
             }
-        } else if (build.type === "batch" && !authorSel) {
-            if (!equalSelected(pullSel, shortenBuildRefs(build.refs))) {
+        } else if (type === "batch" && !authorSel) {
+            if (!equalSelected(pullSel, genShortRefKey(base_ref, pulls))) {
                 continue;
             }
         } else if (pullSel || authorSel) {
             continue;
         }
 
-        if (!jobCountMap.has(build.state)) {
-          jobCountMap.set(build.state, 0);
+        totalJob++;
+        jobCountMap.set(state, (jobCountMap.get(state) || 0) + 1);
+
+        // accumulate a count of the percentage of successful jobs over each interval
+        const started = Date.parse(startTime) / 1000;
+        const finished = Date.parse(completionTime) / 1000;
+        // const finished = completionTime ? Date.parse(completionTime): now;
+
+        const durationSec = completionTime ? finished - started : 0;
+        const durationStr = completionTime ? formatDuration(durationSec) : "";
+
+        if (currentInterval >= 0 && (now - started) > jobInterval[currentInterval][0]) {
+            const successCount = jobCountMap.get("success") || 0;
+            const failureCount = jobCountMap.get("failure") || 0;
+
+            const total = successCount + failureCount;
+            if (total > 0) {
+                jobInterval[currentInterval][1] = successCount / total;
+            } else {
+                jobInterval[currentInterval][1] = 0;
+            }
+            currentInterval++;
+            if (currentInterval >= jobInterval.length) {
+                currentInterval = -1;
+            }
         }
-        totalJob ++;
-        jobCountMap.set(build.state, jobCountMap.get(build.state)! + 1);
-        if (totalJob > 499) {
+
+        if (displayedJob >= 500) {
+            jobHistogram.add(new JobSample(started, durationSec, state, -1));
             continue;
-        }
-        const r = document.createElement("tr");
-        r.appendChild(stateCell(build.state));
-        if (build.pod_name) {
-            const icon = createIcon("description", "Build log");
-            icon.href = "log?job=" + build.job + "&id=" + build.build_id;
-            const cell = document.createElement("td");
-            cell.classList.add("icon-cell");
-            cell.appendChild(icon);
-            r.appendChild(cell);
         } else {
-            r.appendChild(createTextCell(""));
+            jobHistogram.add(new JobSample(started, durationSec, state, builds.childElementCount));
         }
-        r.appendChild(createRerunCell(modal, rerun_command, build.prow_job));
+        displayedJob++;
+        const r = document.createElement("tr");
+        r.appendChild(cell.state(state));
+        if ((agent === "kubernetes" && pod_name) || agent !== "kubernetes") {
+            const logIcon = icon.create("description", "Build log");
+            if (pod_spec == null || pod_spec.containers.length <= 1) {
+                logIcon.href = `log?job=${job}&id=${build_id}`;
+            } else {
+                // this logic exists for legacy jobs that are configured for gubernator compatibility
+                const buildIndex = url.indexOf('/build/');
+                if (buildIndex !== -1) {
+                    const gcsUrl = `${window.location.origin}/view/gcs/${url.substring(buildIndex + '/build/'.length)}`;
+                    logIcon.href = gcsUrl;
+                } else if (url.includes('/view/')) {
+                    logIcon.href = url;
+                } else {
+                    logIcon.href = `log?job=${job}&id=${build_id}`;
+                }
+            }
+            const c = document.createElement("td");
+            c.classList.add("icon-cell");
+            c.appendChild(logIcon);
+            r.appendChild(c);
+        } else {
+            r.appendChild(cell.text(""));
+        }
+        r.appendChild(createRerunCell(modal, rerunCommand, prowJobName));
+        r.appendChild(createViewJobCell(prowJobName));
         const key = groupKey(build);
         if (key !== lastKey) {
             // This is a different PR or commit than the previous row.
             lastKey = key;
             r.className = "changed";
 
-            if (build.type === "periodic") {
-                r.appendChild(createTextCell(""));
-            } else if (build.repo.startsWith("http://") || build.repo.startsWith("https://") ) {
-                r.appendChild(createLinkCell(build.repo, build.repo, ""));
+            if (type === "periodic") {
+                r.appendChild(cell.text(""));
             } else {
-                r.appendChild(createLinkCell(build.repo, "https://github.com/"
-                    + build.repo, ""));
+                let repoLink = repo_link;
+                if (!repoLink) {
+                    repoLink = `/github-link?dest=${org}/${repo}`;
+                }
+                r.appendChild(cell.link(`${org}/${repo}`, repoLink));
             }
-            if (build.type === "presubmit") {
-                r.appendChild(prRevisionCell(build));
-            } else if (build.type === "batch") {
+            if (type === "presubmit") {
+                if (pulls.length) {
+                    r.appendChild(cell.prRevision(`${org}/${repo}`, pulls[0]));
+                } else {
+                    r.appendChild(cell.text(""));
+                }
+            } else if (type === "batch") {
                 r.appendChild(batchRevisionCell(build));
-            } else if (build.type === "postsubmit") {
-                r.appendChild(pushRevisionCell(build));
-            } else if (build.type === "periodic") {
-                r.appendChild(createTextCell(""));
+            } else if (type === "postsubmit") {
+                r.appendChild(cell.commitRevision(`${org}/${repo}`, base_ref, base_sha, base_link));
+            } else if (type === "periodic") {
+                r.appendChild(cell.text(""));
             }
         } else {
             // Don't render identical cells for the same PR/commit.
-            r.appendChild(createTextCell(""));
-            r.appendChild(createTextCell(""));
+            r.appendChild(cell.text(""));
+            r.appendChild(cell.text(""));
         }
         if (spyglass) {
-            if (build.state == 'pending') {
-                let url = window.location.origin + '/view/prowjob/' + build.job + '/' +
-                    build.build_id;
+            // this logic exists for legacy jobs that are configured for gubernator compatibility
+            const buildIndex = url.indexOf('/build/');
+            if (buildIndex !== -1) {
+                const gcsUrl = `${window.location.origin}/view/gcs/${url.substring(buildIndex + '/build/'.length)}`;
+                r.appendChild(createSpyglassCell(gcsUrl));
+            } else if (url.includes('/view/')) {
                 r.appendChild(createSpyglassCell(url));
             } else {
-                const buildIndex = build.url.indexOf('/build/');
-                if (buildIndex === -1) {
-                    r.appendChild(createTextCell(''));
-                } else {
-                    let url = window.location.origin + '/view/gcs/' +
-                        build.url.substring(buildIndex + '/build/'.length);
-                    r.appendChild(createSpyglassCell(url));
-                }
+                r.appendChild(cell.text(''));
             }
         } else {
-            r.appendChild(createTextCell(''));
+            r.appendChild(cell.text(''));
         }
-        if (build.url === "") {
-            r.appendChild(createTextCell(build.job));
+        if (url === "") {
+            r.appendChild(cell.text(job));
         } else {
-            r.appendChild(createLinkCell(build.job, build.url, ""));
+            r.appendChild(cell.link(job, url));
         }
 
-        r.appendChild(createTimeCell(i, parseInt(build.started)));
-        r.appendChild(createTextCell(build.duration));
+        r.appendChild(cell.time(i.toString(), moment.unix(started)));
+        r.appendChild(cell.text(durationStr));
         builds.appendChild(r);
     }
-    const jobCount = document.getElementById("job-count")!;
-    jobCount.textContent = "Showing " + Math.min(totalJob, 500) + "/" + totalJob + " jobs";
-    drawJobBar(totalJob, jobCountMap);
-}
 
-function createSpyglassCell(url: string): HTMLTableDataCellElement {
-    const icon = createIcon('visibility', 'View in Spyglass');
-    icon.href = url;
-    const cell = document.createElement('td');
-    cell.classList.add('icon-cell');
-    cell.appendChild(icon);
-    return cell;
-}
-
-function createTextCell(text: string): HTMLTableDataCellElement {
-    const c = document.createElement("td");
-    c.appendChild(document.createTextNode(text));
-    return c;
-}
-
-function createTimeCell(id: number, time: number): HTMLTableDataCellElement {
-    const momentTime = moment.unix(time);
-    const tid = "time-cell-" + id;
-    const main = document.createElement("div");
-    const isADayOld = momentTime.isBefore(moment().startOf('day'));
-    main.textContent = momentTime.format(isADayOld ? 'MMM DD HH:mm:ss' : 'HH:mm:ss');
-    main.id = tid;
-
-    const tooltip = document.createElement("div");
-    tooltip.textContent = momentTime.format('MMM DD YYYY, HH:mm:ss [UTC]ZZ');
-    tooltip.setAttribute("data-mdl-for", tid);
-    tooltip.classList.add("mdl-tooltip", "mdl-tooltip--large");
-
-    const c = document.createElement("td");
-    c.appendChild(main);
-    c.appendChild(tooltip);
-
-    return c;
-}
-
-function createLinkCell(text: string, url: string, title: string): HTMLTableDataCellElement {
-    const c = document.createElement("td");
-    const a = document.createElement("a");
-    a.href = url;
-    if (title !== "") {
-        a.title = title;
+    // fill out the remaining intervals if necessary
+    if (currentInterval !== -1) {
+        let successCount = jobCountMap.get("success");
+        if (!successCount) {
+            successCount = 0;
+        }
+        let failureCount = jobCountMap.get("failure");
+        if (!failureCount) {
+            failureCount = 0;
+        }
+        const total = successCount + failureCount;
+        for (let i = currentInterval; i < jobInterval.length; i++) {
+            if (total > 0) {
+                jobInterval[i][1] = successCount / total;
+            } else {
+                jobInterval[i][1] = 0;
+            }
+        }
     }
-    a.appendChild(document.createTextNode(text));
-    c.appendChild(a);
-    return c;
+
+    const jobSummary = document.getElementById("job-histogram-summary")!;
+    const success = jobInterval.map((interval) => {
+        if (interval[1] < 0.5) {
+            return `${formatDuration(interval[0])}: <span class="state failure">${Math.ceil(interval[1] * 100)}%</span>`;
+        }
+        return `${formatDuration(interval[0])}: <span class="state success">${Math.ceil(interval[1] * 100)}%</span>`;
+    }).join(", ");
+    jobSummary.innerHTML = `Success rate over time: ${success}`;
+    const jobCount = document.getElementById("job-count")!;
+    jobCount.textContent = `Showing ${displayedJob}/${totalJob} jobs`;
+    drawJobBar(totalJob, jobCountMap);
+
+    // if we aren't filtering the output, cap the histogram y axis to 2 hours because it
+    // contains the bulk of our jobs
+    let max = Number.MAX_SAFE_INTEGER;
+    if (totalJob === allBuilds.items.length) {
+        max = 2 * 3600;
+    }
+    drawJobHistogram(totalJob, jobHistogram, now - (12 * 3600), now, max);
+    if (rerunStatus === "gh_redirect") {
+        modal.style.display = "block";
+        rerunCommand.innerHTML = "Rerunning that job requires GitHub login. Now that you're logged in, try again";
+    }
 }
 
 function createRerunCell(modal: HTMLElement, rerunElement: HTMLElement, prowjob: string): HTMLTableDataCellElement {
-    const url = `https://${window.location.hostname}/rerun?prowjob=${prowjob}`;
+    const url = `${location.protocol}//${location.host}/rerun?prowjob=${prowjob}`;
     const c = document.createElement("td");
-    const icon = createIcon("refresh", "Show instructions for rerunning this job");
-    icon.onclick = () => {
+    const i = icon.create("refresh", "Show instructions for rerunning this job");
+
+    // we actually want to know whether the "access-token-session" cookie exists, but we can't always
+    // access it from the frontend. "github_login" should be set whenever "access-token-session" is
+    i.onclick = () => {
         modal.style.display = "block";
         rerunElement.innerHTML = `kubectl create -f "<a href="${url}">${url}</a>"`;
         const copyButton = document.createElement('a');
@@ -614,19 +744,52 @@ function createRerunCell(modal: HTMLElement, rerunElement: HTMLElement, prowjob:
         copyButton.onclick = () => copyToClipboardWithToast(`kubectl create -f "${url}"`);
         copyButton.innerHTML = "<i class='material-icons state triggered' style='color: gray'>file_copy</i>";
         rerunElement.appendChild(copyButton);
+        if (rerunCreatesJob) {
+            const runButton = document.createElement('a');
+            runButton.innerHTML = "<button class='mdl-button mdl-js-button'>Rerun</button>";
+            runButton.onclick = async () => {
+                gtag("event", "rerun", {
+                    event_category: "engagement",
+                    transport_type: "beacon",
+                });
+                const result = await fetch(url, {
+                    headers: {
+                        "Content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+                        "X-CSRF-Token": csrfToken,
+                    },
+                    method: 'post',
+                });
+                const data = await result.text();
+                if (result.status === 401) {
+                    window.location.href = window.location.origin + `/github-login?dest=${relativeURL({rerun: "gh_redirect"})}`;
+                } else {
+                    rerunElement.innerHTML = data;
+                }
+            };
+            rerunElement.appendChild(runButton);
+        }
     };
-    c.appendChild(icon);
+    c.appendChild(i);
     c.classList.add("icon-cell");
     return c;
 }
 
+function createViewJobCell(prowjob: string): HTMLTableDataCellElement {
+    const c = document.createElement("td");
+    const i = icon.create("pageview", "Show job YAML", () => gtag("event", "view_job_yaml", {event_category: "engagement", transport_type: "beacon"}));
+    i.href = `/prowjob?prowjob=${prowjob}`;
+    c.classList.add("icon-cell");
+    c.appendChild(i);
+    return c;
+}
+
 // copyToClipboard is from https://stackoverflow.com/a/33928558
-// Copies a string to the clipboard. Must be called from within an 
+// Copies a string to the clipboard. Must be called from within an
 // event handler such as click. May return false if it failed, but
-// this is not always possible. Browser support for Chrome 43+, 
+// this is not always possible. Browser support for Chrome 43+,
 // Firefox 42+, Safari 10+, Edge and IE 10+.
 // IE: The clipboard feature may be disabled by an administrator. By
-// default a prompt is shown the first time the clipboard is 
+// default a prompt is shown the first time the clipboard is
 // used (per session).
 function copyToClipboard(text: string) {
     if (window.clipboardData && window.clipboardData.setData) {
@@ -656,95 +819,33 @@ function copyToClipboardWithToast(text: string): void {
     toast.MaterialSnackbar.showSnackbar({message: "Copied to clipboard"});
 }
 
-function stateCell(state: JobState): HTMLTableDataCellElement {
+function batchRevisionCell(build: ProwJob): HTMLTableDataCellElement {
+    const {refs: {org = "", repo = "", pulls = []} = {}} = build.spec;
+
     const c = document.createElement("td");
-    if (!state) {
-        c.appendChild(document.createTextNode(""));
+    if (!pulls.length) {
         return c;
     }
-    c.classList.add("icon-cell");
-
-    let displayState = stateToAdj(state);
-    displayState = displayState[0].toUpperCase() + displayState.slice(1);
-    let displayIcon = "";
-    switch (state) {
-        case "triggered":
-            displayIcon = "schedule";
-            break;
-        case "pending":
-            displayIcon = "watch_later";
-            break;
-        case "success":
-            displayIcon = "check_circle";
-            break;
-        case "failure":
-            displayIcon = "error";
-            break;
-        case "aborted":
-            displayIcon = "remove_circle";
-            break;
-        case "error":
-            displayIcon = "warning";
-            break;
-    }
-    const stateIndicator = document.createElement("i");
-    stateIndicator.classList.add("material-icons", "state", state);
-    stateIndicator.innerText = displayIcon;
-    c.appendChild(stateIndicator);
-    c.title = displayState;
-
-    return c;
-}
-
-function batchRevisionCell(build: Job): HTMLTableDataCellElement {
-    const c = document.createElement("td");
-    const prRefs = build.refs.split(",");
-    for (let i = 1; i < prRefs.length; i++) {
-        if (i != 1) {
+    for (let i = 0; i < pulls.length; i++) {
+        if (i !== 0) {
             c.appendChild(document.createTextNode(", "));
         }
-        const pr = prRefs[i].split(":")[0];
+        const {link, number: prNumber} = pulls[i];
         const l = document.createElement("a");
-        l.href = "https://github.com/" + build.repo + "/pull/" + pr;
-        l.text = pr;
+        if (link) {
+            l.href = link;
+        } else {
+            l.href = `/github-link?dest=${org}/${repo}/pull/${prNumber}`;
+        }
+        l.text = prNumber.toString();
         c.appendChild(document.createTextNode("#"));
         c.appendChild(l);
     }
     return c;
 }
 
-function pushRevisionCell(build: Job): HTMLTableDataCellElement {
-    const c = document.createElement("td");
-    const bl = document.createElement("a");
-    bl.href = "https://github.com/" + build.repo + "/commit/" + build.base_sha;
-    bl.text = build.base_ref + " (" + build.base_sha.slice(0, 7) + ")";
-    c.appendChild(bl);
-    return c;
-}
-
-function prRevisionCell(build: Job): HTMLTableDataCellElement {
-    const c = document.createElement("td");
-    c.appendChild(document.createTextNode("#"));
-    const pl = document.createElement("a");
-    pl.href = "https://github.com/" + build.repo + "/pull/" + build.number;
-    pl.text = build.number.toString();
-    c.appendChild(pl);
-    c.appendChild(document.createTextNode(" ("));
-    const cl = document.createElement("a");
-    cl.href = "https://github.com/" + build.repo + "/pull/" + build.number
-        + '/commits/' + build.pull_sha;
-    cl.text = build.pull_sha.slice(0, 7);
-    c.appendChild(cl);
-    c.appendChild(document.createTextNode(") by "));
-    const al = document.createElement("a");
-    al.href = "https://github.com/" + build.author;
-    al.text = build.author;
-    c.appendChild(al);
-    return c;
-}
-
-function drawJobBar(total: number, jobCountMap: Map<JobState, number>): void {
-  const states: JobState[] = ["success", "pending", "triggered", "error", "failure", "aborted", ""];
+function drawJobBar(total: number, jobCountMap: Map<ProwJobState, number>): void {
+  const states: ProwJobState[] = ["success", "pending", "triggered", "error", "failure", "aborted", ""];
   states.sort((s1, s2) => {
     return jobCountMap.get(s1)! - jobCountMap.get(s2)!;
   });
@@ -763,7 +864,7 @@ function drawJobBar(total: number, jobCountMap: Map<JobState, number>): void {
       el.style.width = "0";
     } else {
       el.textContent = count.toString();
-      tt.textContent = count + " " + stateToAdj(state) + " jobs";
+      tt.textContent = `${count} ${stateToAdj(state)} jobs`;
       if (index === states.length - 1) {
         el.style.width = "auto";
       } else {
@@ -773,7 +874,7 @@ function drawJobBar(total: number, jobCountMap: Map<JobState, number>): void {
   });
 }
 
-function stateToAdj(state: JobState): string {
+function stateToAdj(state: ProwJobState): string {
     switch (state) {
         case "success":
             return "succeeded";
@@ -784,17 +885,142 @@ function stateToAdj(state: JobState): string {
     }
 }
 
-function createIcon(iconString: string, tooltip: string = ""): HTMLAnchorElement {
-    const icon = document.createElement("i");
-    icon.classList.add("icon-button", "material-icons");
-    icon.innerHTML = iconString;
-    if (tooltip !== "") {
-        icon.title = tooltip;
+function parseDuration(duration: string): number {
+    if (duration.length === 0) {
+        return 0;
+    }
+    let seconds = 0;
+    let multiple = 0;
+    for (let i = duration.length; i >= 0; i--) {
+        const ch = duration[i];
+        if (ch === 's') {
+            multiple = 1;
+        } else if (ch === 'm') {
+            multiple = 60;
+        } else if (ch === 'h') {
+            multiple = 60 * 60;
+        } else if (ch >= '0' && ch <= '9') {
+            seconds += Number(ch) * multiple;
+            multiple *= 10;
+        }
+    }
+    return seconds;
+}
+
+function formatDuration(seconds: number): string {
+    const parts: string[] = [];
+    if (seconds >= 3600) {
+        const hours = Math.floor(seconds / 3600);
+        parts.push(String(hours));
+        parts.push('h');
+        seconds = seconds % 3600;
+    }
+    if (seconds >= 60) {
+        const minutes = Math.floor(seconds / 60);
+        if (minutes > 0) {
+            parts.push(String(minutes));
+            parts.push('m');
+            seconds = seconds % 60;
+        }
+    }
+    if (seconds > 0) {
+        parts.push(String(seconds));
+        parts.push('s');
+    }
+    return parts.join('');
+}
+
+function drawJobHistogram(total: number, jobHistogram: JobHistogram, start: number, end: number, maximum: number): void {
+    const startEl = document.getElementById("job-histogram-start") as HTMLSpanElement;
+    if (startEl != null) {
+        startEl.textContent = `${formatDuration(end - start)} ago`;
     }
 
-    const container = document.createElement("a");
-    container.appendChild(icon);
-    container.classList.add("mdl-button", "mdl-js-button", "mdl-button--icon");
+    // make sure the empty table is hidden
+    const tableEl = document.getElementById("job-histogram") as HTMLTableElement;
+    const labelsEl = document.getElementById("job-histogram-labels") as HTMLDivElement;
+    if (jobHistogram.length === 0) {
+        tableEl.style.display = "none";
+        labelsEl.style.display = "none";
+        return;
+    }
+    tableEl.style.display = "";
+    labelsEl.style.display = "";
 
-    return container;
+    const el = document.getElementById("job-histogram-content") as HTMLTableSectionElement;
+    el.title = `Showing ${jobHistogram.length} builds from last ${formatDuration(end - start)} by start time and duration, newest to oldest.`;
+    const rows = 10;
+    const width = 12;
+    const cols = Math.round(el.clientWidth / width);
+
+    // initialize the table if the row count changes
+    if (el.childNodes.length !== rows) {
+        el.innerHTML = "";
+        for (let i = 0; i < rows; i++) {
+            const tr = document.createElement('tr');
+            for (let j = 0; j < cols; j++) {
+                const td = document.createElement('td');
+                tr.appendChild(td);
+            }
+            el.appendChild(tr);
+        }
+    }
+
+    const buckets = jobHistogram.buckets(start, end, cols);
+    buckets.limitMaximum(maximum);
+
+    // show the max and mid y-axis labels rounded up to the nearest 10 minute mark
+    let maxY = buckets.max;
+    maxY = Math.ceil(maxY / 600);
+    const yMax = document.getElementById("job-histogram-labels-y-max") as HTMLSpanElement;
+    yMax.innerText = `${formatDuration(maxY * 600)}+`;
+    const yMid = document.getElementById("job-histogram-labels-y-mid") as HTMLSpanElement;
+    yMid.innerText = `${formatDuration(maxY / 2 * 600)}`;
+
+    // populate the buckets
+    buckets.data.forEach((bucket, colIndex) => {
+        let lastRowIndex = 0;
+        buckets.linearChunks(bucket, rows).forEach((samples, rowIndex) =>  {
+            lastRowIndex = rowIndex + 1;
+            const td = el.childNodes[rows - 1 - rowIndex].childNodes[cols - colIndex - 1] as HTMLTableCellElement;
+            if (samples.length === 0) {
+                td.removeAttribute('title');
+                td.className = '';
+                return;
+            }
+            td.dataset.sampleRow = String(samples[0].row);
+            const failures = samples.reduce((sum, sample) => {
+                return sample.state !== 'success' ? sum + 1 : sum;
+            }, 0);
+            if (failures === 0) {
+                td.title = `${samples.length} succeeded`;
+            } else {
+                if (failures === samples.length) {
+                    td.title = `${failures} failed`;
+                } else {
+                    td.title = `${failures}/${samples.length} failed`;
+                }
+            }
+            td.style.opacity = String(0.2 + samples.length / bucket.length * 0.8);
+            if (samples[0].row !== -1) {
+                td.className = `active success-${Math.floor(10 - (failures / samples.length) * 10)}`;
+            } else {
+                td.className = `success-${Math.floor(10 - (failures / samples.length) * 10)}`;
+            }
+        });
+        for (let rowIndex = lastRowIndex; rowIndex < rows; rowIndex++) {
+            const td = el.childNodes[rows - 1 - rowIndex].childNodes[cols - colIndex - 1] as HTMLTableCellElement;
+            td.removeAttribute('title');
+            td.className = '';
+        }
+    });
+}
+
+function createSpyglassCell(url: string): HTMLTableDataCellElement {
+    const i = icon.create('visibility', 'View in Spyglass');
+    i.href = url;
+    const c = document.createElement('td');
+    c.classList.add('icon-cell');
+    c.appendChild(i);
+    return c;
 }

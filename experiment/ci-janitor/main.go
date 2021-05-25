@@ -21,19 +21,18 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 
 	"github.com/sirupsen/logrus"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/test-infra/prow/config"
+	configflagutil "k8s.io/test-infra/prow/flagutil/config"
 )
 
 type options struct {
-	configPath    string
-	jobConfigPath string
-	janitorPath   string
+	prowConfig  configflagutil.ConfigOptions
+	janitorPath string
 }
 
 var (
@@ -54,18 +53,13 @@ var (
 		"k8s-jkns-pr-kubemark",
 		"k8s-jkns-pr-node-e2e",
 		"k8s-jkns-pr-gce-gpus",
-		"k8s-gke-gpu-pr",
 		"k8s-presubmit-scale",
 	}
 )
 
 func (o *options) Validate() error {
-	if o.configPath == "" {
-		return errors.New("required flag --config-path was unset")
-	}
-
-	if o.jobConfigPath == "" {
-		return errors.New("required flag --job-config-path was unset")
+	if err := o.prowConfig.Validate(false); err != nil {
+		return err
 	}
 
 	if o.janitorPath == "" {
@@ -77,17 +71,25 @@ func (o *options) Validate() error {
 
 func gatherOptions() options {
 	o := options{}
-	flag.StringVar(&o.configPath, "config-path", "", "Path to config.yaml.")
-	flag.StringVar(&o.jobConfigPath, "job-config-path", "", "Path to prow job configs.")
-	flag.StringVar(&o.janitorPath, "janitor-path", "", "Path to janitor.py.")
+	o.prowConfig.AddFlags(flag.CommandLine)
+	flag.StringVar(&o.janitorPath, "janitor-path", "", "Path to gcp_janitor.py.")
 	flag.Parse()
 	return o
 }
 
-func findProject(spec *v1.PodSpec) (string, int) {
+func containers(jb config.JobBase) []v1.Container {
+	var containers []v1.Container
+	if jb.Spec != nil {
+		containers = append(containers, jb.Spec.Containers...)
+		containers = append(containers, jb.Spec.InitContainers...)
+	}
+	return containers
+}
+
+func findProject(jb config.JobBase) (string, int) {
 	project := ""
 	ttl := defaultTTL
-	for _, container := range spec.Containers {
+	for _, container := range containers(jb) {
 		for _, arg := range container.Args {
 			if strings.HasPrefix(arg, "--gcp-project=") {
 				project = strings.TrimPrefix(arg, "--gcp-project=")
@@ -129,42 +131,38 @@ func main() {
 		logrus.Fatalf("Invalid options: %v", err)
 	}
 
-	conf, err := config.Load(o.configPath, o.jobConfigPath)
+	agent, err := o.prowConfig.ConfigAgent()
 	if err != nil {
 		logrus.WithError(err).Fatal("Error loading config.")
 	}
+	conf := agent.Config()
 
 	failed := []string{}
 
-	for _, v := range conf.AllPresubmits(nil) {
-		if project, ttl := findProject(v.Spec); project != "" {
-			if err := clean(project, o.janitorPath, ttl); err != nil {
-				failed = append(failed, project)
-			}
-		}
-	}
+	var jobs []config.JobBase
 
-	for _, v := range conf.AllPostsubmits(nil) {
-		if project, ttl := findProject(v.Spec); project != "" {
-			if err := clean(project, o.janitorPath, ttl); err != nil {
-				failed = append(failed, project)
-			}
-		}
+	for _, v := range conf.AllStaticPresubmits(nil) {
+		jobs = append(jobs, v.JobBase)
 	}
-
+	for _, v := range conf.AllStaticPostsubmits(nil) {
+		jobs = append(jobs, v.JobBase)
+	}
 	for _, v := range conf.AllPeriodics() {
-		if project, ttl := findProject(v.Spec); project != "" {
+		jobs = append(jobs, v.JobBase)
+	}
+
+	for _, j := range jobs {
+		if project, ttl := findProject(j); project != "" {
 			if err := clean(project, o.janitorPath, ttl); err != nil {
+				logrus.WithError(err).Errorf("failed to clean %q", project)
 				failed = append(failed, project)
 			}
 		}
 	}
 
-	if len(failed) == 0 {
-		logrus.Info("Successfully cleaned up all projects!")
-		os.Exit(0)
+	if len(failed) > 0 {
+		logrus.Fatalf("Failed clean %d projects: %v", len(failed), failed)
 	}
 
-	logrus.Warnf("Failed clean %d projects: %v", len(failed), failed)
-	os.Exit(1)
+	logrus.Info("Successfully cleaned up all projects!")
 }

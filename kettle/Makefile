@@ -23,15 +23,11 @@ CLUSTER       ?= g8r
 get-cluster-credentials:
 	kubectl config use-context gke_k8s-gubernator_us-west1-b_g8r || gcloud container clusters get-credentials "$(CLUSTER)" --project="$(PROJECT)" --zone="$(ZONE)"
 
-build:
-	docker build -t $(IMG):$(TAG) .
-	docker tag $(IMG):$(TAG) $(IMG):latest
-	echo Built $(IMG):$(TAG) and tagged with $(IMG):latest ;
+push-prod:
+	bazel run //images/builder -- --project=k8s-testimages --scratch-bucket=gs://k8s-testimages-scratch --build-dir=. kettle/
 
-push: build
-	docker push $(IMG):$(TAG)
-	docker push $(IMG):latest
-	echo Pushed $(IMG):latest and $(IMG):$(TAG)
+push:
+	bazel run //images/builder -- --project=k8s-testimages --allow-dirty --build-dir=. kettle/
 
 deploy: get-cluster-credentials
 	sed "s/:latest/:$(TAG)/g" deployment.yaml | kubectl apply -f - --record
@@ -39,10 +35,14 @@ deploy: get-cluster-credentials
 update: get-cluster-credentials
 	kubectl set image deployment/kettle kettle=$(IMG):$(TAG) --record
 
+deploy-staging: get-cluster-credentials
+	sed "s/:latest/:$(TAG)/g" deployment-staging.yaml | kubectl apply -f - --record
+
+update-staging: get-cluster-credentials
+	kubectl set image deployment/kettle-staging kettle-staging=$(IMG):$(TAG) --record
+
 rollback: get-cluster-credentials
 	kubectl rollout undo deployments/kettle
 
 
-.PHONY: all build push
-
-all: build
+.PHONY: all push

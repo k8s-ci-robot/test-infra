@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# NOTE: CHANGE THIS LINE TO FORCE A NEW IMAGE: 20200109
 # Includes go and gcloud
-FROM golang:1.10.2
-LABEL maintainer="senlu@google.com"
+FROM golang:1.13
 
 # add env we can debug with the image name:tag
 ARG IMAGE_ARG
@@ -24,7 +24,7 @@ RUN apt-get update && apt-get install -y \
     python \
     rsync \
     wget && \
-    apt-get clean
+    rm -rf /var/lib/apt/lists/*
 
 # Install gcloud
 

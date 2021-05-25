@@ -8,6 +8,7 @@ export interface TideQuery {
   includedBranches?: string[];
   labels?: string[];
   missingLabels?: string[];
+  author?: string;
   milestone?: string;
   reviewApprovedRequired?: boolean;
 }
@@ -16,14 +17,14 @@ export interface PullRequest extends BasePullRequest {
   Title: string;
   HeadRefName: string;
   Commits: {
-    Nodes: {
+    Nodes: Array<{
       Commit: Commit;
-    }[];
+    }>;
   };
   Labels: {
-    Nodes: {
+    Nodes: Array<{
       Name: string;
-    }[];
+    }>;
   };
   Milestone?: {
     Title: string;

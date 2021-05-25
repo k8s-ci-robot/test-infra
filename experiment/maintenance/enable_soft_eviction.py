@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 # Copyright 2017 The Kubernetes Authors.
 #
@@ -17,11 +17,10 @@
 # This script hijacks the COS kubelet service definition to set soft eviction thresholds
 # for nodefs on the prow builds cluster
 # USE AT YOUR OWN RISK.
-# TODO(bentheelder): delete this once dynamic kubelet config is available
+# TODO: delete this once dynamic kubelet config is available
 
 # pylint: disable=line-too-long
 
-from __future__ import print_function
 
 import os
 import sys
@@ -48,7 +47,7 @@ KUBELET_UPDATE_COMMANDS = [
 
 def get_nodes():
     command = ['kubectl', 'get', 'nodes']
-    res = subprocess.check_output(command)
+    res = subprocess.check_output(command, encoding='utf-8')
     nodes = []
     for line in res.split('\n')[1:]:
         node = line.split(' ')[0]

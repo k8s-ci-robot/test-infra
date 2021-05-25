@@ -17,11 +17,16 @@ limitations under the License.
 package spyglass
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
-	"k8s.io/test-infra/prow/spyglass/lenses"
+	"k8s.io/test-infra/prow/kube"
+	"k8s.io/test-infra/prow/spyglass/api"
+	"k8s.io/test-infra/prow/spyglass/lenses/common"
 )
+
+const singleLogName = "build-log.txt"
 
 // PodLogArtifactFetcher is used to fetch artifacts from k8s apiserver
 type PodLogArtifactFetcher struct {
@@ -33,18 +38,23 @@ func NewPodLogArtifactFetcher(ja jobAgent) *PodLogArtifactFetcher {
 	return &PodLogArtifactFetcher{jobAgent: ja}
 }
 
-// artifact constructs an artifact handle from the given key
-func (af *PodLogArtifactFetcher) artifact(key string, sizeLimit int64) (lenses.Artifact, error) {
-	parsed := strings.Split(key, "/")
-	if len(parsed) != 2 {
-		return nil, fmt.Errorf("Could not fetch artifact: key %q incorrectly formatted", key)
-	}
-	jobName := parsed[0]
-	buildID := parsed[1]
-
-	podLog, err := NewPodLogArtifact(jobName, buildID, sizeLimit, af.jobAgent)
+// artifact constructs an artifact handle for the given job build
+func (af *PodLogArtifactFetcher) Artifact(_ context.Context, key, artifactName string, sizeLimit int64) (api.Artifact, error) {
+	jobName, buildID, err := common.KeyToJob(key)
 	if err != nil {
-		return nil, fmt.Errorf("Error accessing pod log from given source: %v", err)
+		return nil, fmt.Errorf("could not derive job: %v", err)
+	}
+	containerName := containerName(artifactName)
+	podLog, err := NewPodLogArtifact(jobName, buildID, artifactName, containerName, sizeLimit, af.jobAgent)
+	if err != nil {
+		return nil, fmt.Errorf("error accessing pod log from given source: %w", err)
 	}
 	return podLog, nil
+}
+
+func containerName(artifactName string) string {
+	if artifactName == singleLogName {
+		return kube.TestContainerName
+	}
+	return strings.TrimSuffix(artifactName, fmt.Sprintf("-%s", singleLogName))
 }

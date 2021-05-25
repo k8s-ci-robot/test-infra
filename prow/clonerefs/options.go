@@ -25,8 +25,9 @@ import (
 	"strings"
 	"text/template"
 
-	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/test-infra/prow/kube"
+	"github.com/sirupsen/logrus"
+	prowapi "k8s.io/test-infra/prow/apis/prowjobs/v1"
+	"k8s.io/test-infra/prow/pod-utils/clone"
 )
 
 // Options configures the clonerefs tool
@@ -47,10 +48,13 @@ type Options struct {
 	GitUserEmail string `json:"git_user_email,omitempty"`
 
 	// GitRefs are the refs to clone
-	GitRefs []kube.Refs `json:"refs"`
+	GitRefs []prowapi.Refs `json:"refs"`
 	// KeyFiles are files containing SSH keys to be used
 	// when cloning. Will be added to `ssh-agent`.
 	KeyFiles []string `json:"key_files,omitempty"`
+
+	// OauthTokenFile is the path of a file that contains an OAuth token.
+	OauthTokenFile string `json:"oauth_token_file,omitempty"`
 
 	// HostFingerPrints are ssh-keyscan host fingerprint lines to use
 	// when cloning. Will be added to ~/.ssh/known_hosts
@@ -61,12 +65,15 @@ type Options struct {
 	// limit to parallelism
 	MaxParallelWorkers int `json:"max_parallel_workers,omitempty"`
 
-	// used to hold flag values
-	refs       gitRefs
-	clonePath  orgRepoFormat
-	cloneURI   orgRepoFormat
-	keys       stringSlice
+	Fail bool `json:"fail,omitempty"`
+
 	CookiePath string `json:"cookie_path,omitempty"`
+
+	// used to hold flag values
+	refs      gitRefs
+	clonePath orgRepoFormat
+	cloneURI  orgRepoFormat
+	keys      stringSlice
 }
 
 // Validate ensures that the configuration options are valid
@@ -83,16 +90,19 @@ func (o *Options) Validate() error {
 		return errors.New("no refs specified to clone")
 	}
 
-	seen := map[string]sets.String{}
-	for _, ref := range o.GitRefs {
-		if _, seenOrg := seen[ref.Org]; seenOrg {
-			if seen[ref.Org].Has(ref.Repo) {
-				return errors.New("sync config for %s/%s provided more than once")
+	seen := make(map[string]int)
+	for i, ref := range o.GitRefs {
+		path := clone.PathForRefs(o.SrcRoot, ref)
+		if existing, ok := seen[path]; ok {
+			existingRef := o.GitRefs[existing]
+			err := fmt.Errorf("clone ref config %d (for %s/%s) will be extracted to %s, which clone ref %d (for %s/%s) is also using", i, ref.Org, ref.Repo, path, existing, existingRef.Org, existingRef.Repo)
+			if existingRef.Org == ref.Org && existingRef.Repo == ref.Repo {
+				return err
 			}
-			seen[ref.Org].Insert(ref.Repo)
-		} else {
-			seen[ref.Org] = sets.NewString(ref.Repo)
+			// preserving existing behavior where this is a warning, not an error
+			logrus.WithError(err).WithField("path", path).Warning("multiple refs clone to the same location")
 		}
+		seen[path] = i
 	}
 
 	return nil
@@ -152,11 +162,12 @@ func (o *Options) AddFlags(fs *flag.FlagSet) {
 	fs.Var(&o.clonePath, "clone-alias", "Format string for the path to clone to")
 	fs.Var(&o.cloneURI, "uri-prefix", "Format string for the URI prefix to clone from")
 	fs.IntVar(&o.MaxParallelWorkers, "max-workers", 0, "Maximum number of parallel workers, unset for unlimited.")
-	fs.StringVar(&o.CookiePath, "cookiefile", "", "Path to git http.coookiefile")
+	fs.StringVar(&o.CookiePath, "cookiefile", "", "Path to git http.cookiefile")
+	fs.BoolVar(&o.Fail, "fail", false, "Exit with failure if any of the refs can't be fetched.")
 }
 
 type gitRefs struct {
-	gitRefs []kube.Refs
+	gitRefs []prowapi.Refs
 }
 
 func (r *gitRefs) String() string {
@@ -167,7 +178,7 @@ func (r *gitRefs) String() string {
 	return representation.String()
 }
 
-// Set parses out a kube.Refs from the user string.
+// Set parses out a prowapi.Refs from the user string.
 // The following example shows all possible fields:
 //   org,repo=base-ref:base-sha[,pull-number:pull-sha]...
 // For the base ref and every pull number, the SHAs

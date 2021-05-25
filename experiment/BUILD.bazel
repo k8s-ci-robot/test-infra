@@ -1,28 +1,10 @@
+load("@py3_deps//:requirements.bzl", "requirement")
+
 py_binary(
     name = "flakedetector",
     srcs = ["flakedetector.py"],
-    deps = ["@requests"],
-)
-
-py_binary(
-    name = "generate_tests",
-    srcs = ["generate_tests.py"],
-    data = [
-        "test_config.yaml",
-        "//config:prowjobs",
-        "//jobs",
-        "//prow:configs",
-    ],
-    deps = ["@ruamel_yaml//ruamel/yaml:ruamel.yaml"],
-)
-
-py_binary(
-    name = "fix_testgrid_config",
-    srcs = ["fix_testgrid_config.py"],
-    data = [
-        "//testgrid:config-yaml",
-    ],
-    deps = ["@ruamel_yaml//ruamel/yaml:ruamel.yaml"],
+    python_version = "PY3",
+    deps = [requirement("requests")],
 )
 
 filegroup(
@@ -37,11 +19,20 @@ filegroup(
     srcs = [
         ":package-srcs",
         "//experiment/aws-stockout:all-srcs",
-        "//experiment/bootstrap:all-srcs",
+        "//experiment/bumpmonitoring:all-srcs",
         "//experiment/ci-janitor:all-srcs",
+        "//experiment/cluster-upgrader:all-srcs",
+        "//experiment/clustersecretbackup:all-srcs",
         "//experiment/coverage:all-srcs",
+        "//experiment/dummybenchmarks:all-srcs",
+        "//experiment/gerrit-onboarder:all-srcs",
+        "//experiment/image-bumper:all-srcs",
+        "//experiment/logviewer/gcsreader:all-srcs",
         "//experiment/manual-trigger:all-srcs",
-        "//experiment/tracer:all-srcs",
+        "//experiment/prowjob-report:all-srcs",
+        "//experiment/service-account-creator:all-srcs",
+        "//experiment/slack-oncall-updater:all-srcs",
+        "//experiment/update-hook:all-srcs",
     ],
     tags = ["automanaged"],
     visibility = ["//visibility:public"],

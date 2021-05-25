@@ -24,6 +24,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 
+	"k8s.io/test-infra/prow/config"
 	"k8s.io/test-infra/prow/git/localgit"
 	"k8s.io/test-infra/prow/github"
 	"k8s.io/test-infra/prow/plugins"
@@ -103,7 +104,7 @@ func TestMinConfidence(t *testing.T) {
 	half := 0.5
 	cases := []struct {
 		name     string
-		golint   *plugins.Golint
+		golint   plugins.Golint
 		expected float64
 	}{
 		{
@@ -112,17 +113,17 @@ func TestMinConfidence(t *testing.T) {
 		},
 		{
 			name:     "no confidence set",
-			golint:   &plugins.Golint{},
+			golint:   plugins.Golint{},
 			expected: defaultConfidence,
 		},
 		{
 			name:     "confidence set to zero",
-			golint:   &plugins.Golint{MinimumConfidence: &zero},
+			golint:   plugins.Golint{MinimumConfidence: &zero},
 			expected: zero,
 		},
 		{
 			name:     "confidence set positive",
-			golint:   &plugins.Golint{MinimumConfidence: &half},
+			golint:   plugins.Golint{MinimumConfidence: &half},
 			expected: half,
 		},
 	}
@@ -137,7 +138,15 @@ func TestMinConfidence(t *testing.T) {
 }
 
 func TestLint(t *testing.T) {
-	lg, c, err := localgit.New()
+	testLint(localgit.New, t)
+}
+
+func TestLintV2(t *testing.T) {
+	testLint(localgit.NewV2, t)
+}
+
+func testLint(clients localgit.Clients, t *testing.T) {
+	lg, c, err := clients()
 	if err != nil {
 		t.Fatalf("Making localgit: %v", err)
 	}
@@ -218,7 +227,14 @@ func TestLint(t *testing.T) {
 }
 
 func TestLintCodeSuggestion(t *testing.T) {
+	testLintCodeSuggestion(localgit.New, t)
+}
 
+func TestLintCodeSuggestionV2(t *testing.T) {
+	testLintCodeSuggestion(localgit.NewV2, t)
+}
+
+func testLintCodeSuggestion(clients localgit.Clients, t *testing.T) {
 	var testcases = []struct {
 		name       string
 		codeChange string
@@ -273,9 +289,105 @@ func TestLintCodeSuggestion(t *testing.T) {
 			},
 			comment: "",
 		},
+		{
+			name:       "Check errorf with errors",
+			codeChange: "@@ -0,0 +1,14 @@\n+/*\n+Package bar comment\n+*/\n+package bar\n+\n+import (\n+        \"errors\"\n+        \"fmt\"\n+)\n+\n+func f(x int) error {\n+        return errors.New(fmt.Sprintf(\"something %d\", x))\n+}\n+",
+			pullFiles: map[string][]byte{
+				"qux.go": []byte("/*\nPackage bar comment\n*/\npackage bar\n\nimport (\n        \"errors\"\n        \"fmt\"\n)\n\nfunc f(x int) error {\n        return errors.New(fmt.Sprintf(\"something %d\", x))\n}\n"),
+			},
+			comment: "```suggestion\n        return fmt.Errorf(\"something %d\", x)\n```\nGolint errors: should replace errors.New(fmt.Sprintf(...)) with fmt.Errorf(...). <!-- golint -->",
+		},
+		{
+			name:       "Check errorf: no error",
+			codeChange: "@@ -0,0 +1,14 @@\n+/*\n+Package bar comment\n+*/\n+package bar\n+\n+import (\n+        \"errors\"\n+        \"fmt\"\n+)\n+\n+func f(x int) error {\n+        return fmt.Errorf(\"something %!d(MISSING)\", x)\n+}\n+",
+			pullFiles: map[string][]byte{
+				"qux.go": []byte("/*\nPackage bar comment\n*/\npackage bar\n\nimport (\n        \"errors\"\n        \"fmt\"\n)\n\nfunc f(x int) error {        return fmt.Errorf(\"something %!d(MISSING)\", x)\n}\n"),
+			},
+			comment: "",
+		},
+		{
+			name:       "Check loop range: omit values",
+			codeChange: "@@ -0,0 +1,10 @@\n+/*\n+Package bar comment\n+*/\n+package bar\n+\n+func f() {\n+for _ = range m {\n+}\n+}\n+",
+			pullFiles: map[string][]byte{
+				"qux.go": []byte("/*\nPackage bar comment\n*/\npackage bar\n\nfunc f() {\nfor _ = range m {\n}\n}\n"),
+			},
+			comment: "```suggestion\nfor range m {\n```\nGolint range-loop: should omit values from range; this loop is equivalent to `for range ...`. <!-- golint -->",
+		},
+		{
+			name:       "Check loop range: omit two values",
+			codeChange: "@@ -0,0 +1,10 @@\n+/*\n+Package bar comment\n+*/\n+package bar\n+\n+func f() {\n+for _, _ = range m {\n+}\n+}\n+",
+			pullFiles: map[string][]byte{
+				"qux.go": []byte("/*\nPackage bar comment\n*/\npackage bar\n\nfunc f() {\nfor _, _ = range m {\n}\n}\n"),
+			},
+			comment: "```suggestion\nfor range m {\n```\nGolint range-loop: should omit values from range; this loop is equivalent to `for range ...`. <!-- golint -->",
+		},
+		{
+			name:       "Check loop range: omit 2nd value with =",
+			codeChange: "@@ -0,0 +1,11 @@\n+/*\n+Package bar comment\n+*/\n+package bar\n+\n+func f() {\n+var y = 0\n+for y, _ = range m {\n+}\n+}\n+",
+			pullFiles: map[string][]byte{
+				"qux.go": []byte("/*\nPackage bar comment\n*/\npackage bar\n\nfunc f() {\nvar y = 0\nfor y, _ = range m {\n}\n}\n"),
+			},
+			comment: "```suggestion\nfor y = range m {\n```\nGolint range-loop: should omit 2nd value from range; this loop is equivalent to `for y = range ...`. <!-- golint -->",
+		},
+		{
+			name:       "Check loop range: omit 2nd value with :=",
+			codeChange: "@@ -0,0 +1,10 @@\n+/*\n+Package bar comment\n+*/\n+package bar\n+\n+func f() {\n+for y, _ := range m {\n+}\n+}\n+",
+			pullFiles: map[string][]byte{
+				"qux.go": []byte("/*\nPackage bar comment\n*/\npackage bar\n\nfunc f() {\nfor y, _ := range m {\n}\n}\n"),
+			},
+			comment: "```suggestion\nfor y := range m {\n```\nGolint range-loop: should omit 2nd value from range; this loop is equivalent to `for y := range ...`. <!-- golint -->",
+		},
+		{
+			name:       "Check loop range: no error",
+			codeChange: "@@ -0,0 +1,10 @@\n+/*\n+Package bar comment\n+*/\n+package bar\n+\n+func f() {\n+for y := range m {\n+}\n+}\n+",
+			pullFiles: map[string][]byte{
+				"qux.go": []byte("/*\nPackage bar comment\n*/\npackage bar\n\nfunc f() {\nfor y := range m {\n}\n}\n"),
+			},
+			comment: "",
+		},
+		{
+			name:       "Check variable declaration: should drop type",
+			codeChange: "@@ -0,0 +1,9 @@\n+/*\n+Package bar comment\n+*/\n+package bar\n+\n+func f() {\n+var myInt int = 7\n+}\n+",
+			pullFiles: map[string][]byte{
+				"qux.go": []byte("/*\nPackage bar comment\n*/\npackage bar\n\nfunc f() {\nvar myInt int = 7\n}\n"),
+			},
+			comment: "```suggestion\nvar myInt = 7\n```\nGolint type-inference: should omit type int from declaration of var myInt; it will be inferred from the right-hand side. <!-- golint -->",
+		},
+		{
+			name:       "Check variable declaration: should drop value (int)",
+			codeChange: "@@ -0,0 +1,9 @@\n+/*\n+Package bar comment\n+*/\n+package bar\n+\n+func f() {\n+var myZeroInt int = 0\n+}\n+",
+			pullFiles: map[string][]byte{
+				"qux.go": []byte("/*\nPackage bar comment\n*/\npackage bar\n\nfunc f() {\nvar myZeroInt int = 0\n}\n"),
+			},
+			comment: "```suggestion\nvar myZeroInt int\n```\nGolint zero-value: should drop = 0 from declaration of var myZeroInt; it is the zero value. <!-- golint -->",
+		},
+		{
+			name:       "Check variable declaration: should drop value (float32)",
+			codeChange: "@@ -0,0 +1,9 @@\n+/*\n+Package bar comment\n+*/\n+package bar\n+\n+func f() {\n+var myZeroFlt float32 = 0.\n+}\n+",
+			pullFiles: map[string][]byte{
+				"qux.go": []byte("/*\nPackage bar comment\n*/\npackage bar\n\nfunc f() {\nvar myZeroFlt float32 = 0.\n}\n"),
+			},
+			comment: "```suggestion\nvar myZeroFlt float32\n```\nGolint zero-value: should drop = 0. from declaration of var myZeroFlt; it is the zero value. <!-- golint -->",
+		},
+		{
+			name:       "Check variable declaration: no value suggestion",
+			codeChange: "@@ -0,0 +1,9 @@\n+/*\n+Package bar comment\n+*/\n+package bar\n+\n+func f() {\n+var myZeroRune2 rune\n+}\n+",
+			pullFiles: map[string][]byte{
+				"qux.go": []byte("/*\nPackage bar comment\n*/\npackage bar\n\nfunc f() {\nvar myZeroRune2 rune\n}\n"),
+			},
+			comment: "",
+		},
+		{
+			name:       "Check variable declaration: no type suggestion",
+			codeChange: "@@ -0,0 +1,9 @@\n+/*\n+Package bar comment\n+*/\n+package bar\n+\n+func f() {\n+var myInt = 7\n+}\n+",
+			pullFiles: map[string][]byte{
+				"qux.go": []byte("/*\nPackage bar comment\n*/\npackage bar\n\nfunc f() {\nvar myInt = 7\n}\n"),
+			},
+			comment: "",
+		},
 	}
 
-	lg, c, err := localgit.New()
+	lg, c, err := clients()
 	if err != nil {
 		t.Fatalf("Making localgit: %v", err)
 	}
@@ -324,6 +436,167 @@ func TestLintCodeSuggestion(t *testing.T) {
 			}
 			if test.comment != gh.comment.Comments[0].Body {
 				t.Fatalf("Expected\n" + test.comment + "\n but got\n" + gh.comment.Comments[0].Body)
+			}
+		}
+	}
+}
+
+func TestLintError(t *testing.T) {
+	testLintError(localgit.New, t)
+}
+
+func TestLintErrorV2(t *testing.T) {
+	testLintError(localgit.NewV2, t)
+}
+
+func testLintError(clients localgit.Clients, t *testing.T) {
+
+	var testcases = []struct {
+		name       string
+		codeChange string
+		pullFiles  map[string][]byte
+		comments   []github.DraftReviewComment
+	}{
+		{
+			name: "Golint error",
+			codeChange: "@@ -0,0 +1,15 @@\n+" +
+				"/*\n+" +
+				"Package bar comment\n+" +
+				"*/\n+" +
+				"package bar\n+" +
+				"\n+" +
+				"func f(m []string) {\n+" +
+				"      for _ = range m {\n+" +
+				"      }\n+" +
+				"}\n+" +
+				"\n+" +
+				"for b() error {\n+" +
+				"return nil\n+" +
+				"}\n+",
+			pullFiles: map[string][]byte{
+				"qux.go": []byte("/*\n" +
+					"Package bar comment\n" +
+					"*/\n" +
+					"package bar\n" +
+					"\n" +
+					"func f(m []string) {\n" +
+					"      for _ = range m {\n" +
+					"      }\n" +
+					"}\n" +
+					"\n" +
+					"for b() error {\n" +
+					"return nil\n" +
+					"}\n"),
+			},
+			comments: []github.DraftReviewComment{
+				{
+					Body:     "expected declaration, found 'for'",
+					Position: 11,
+					Path:     "qux.go",
+				},
+				{
+					Body: "computing added lines in qux.go: invalid patch: " +
+						"@@ -0,0 +1,15 @@\n+" +
+						"/*\n+" +
+						"Package bar comment\n+" +
+						"*/\n+" +
+						"package bar\n+" +
+						"\n+" +
+						"func f(m []string) {\n+" +
+						"      for _ = range m {\n+" +
+						"      }\n+" +
+						"}\n+" +
+						"\n+" +
+						"for b() error {\n+" +
+						"return nil\n+" +
+						"}\n+",
+					Position: 0,
+					Path:     "qux.go",
+				},
+			},
+		},
+		{
+			name: "No golint error",
+			codeChange: "@@ -0,0 +1,9 @@\n+" +
+				"/*\n+" +
+				"Package bar comment\n+" +
+				"*/\n+" +
+				"package bar\n+" +
+				"\n+" +
+				"func f() {\n+" +
+				"      var myZeroFlt float32 = 0.\n+" +
+				"}\n+",
+			pullFiles: map[string][]byte{
+				"qux.go": []byte("/*\n" +
+					"Package bar comment\n" +
+					"*/\n" +
+					"package bar\n" +
+					"\n" +
+					"func b() error {\n" +
+					"return nil\n" +
+					"}\n"),
+			},
+			comments: nil,
+		},
+	}
+
+	lg, c, err := clients()
+	if err != nil {
+		t.Fatalf("Making localgit: %v", err)
+	}
+	defer func() {
+		if err := lg.Clean(); err != nil {
+			t.Errorf("Cleaning up localgit: %v", err)
+		}
+		if err := c.Clean(); err != nil {
+			t.Errorf("Cleaning up client: %v", err)
+		}
+	}()
+	if err := lg.MakeFakeRepo("foo", "bar"); err != nil {
+		t.Fatalf("Making fake repo: %v", err)
+	}
+	if err := lg.AddCommit("foo", "bar", initialFiles); err != nil {
+		t.Fatalf("Adding initial commit: %v", err)
+	}
+	if err := lg.CheckoutNewBranch("foo", "bar", "pull/42/head"); err != nil {
+		t.Fatalf("Checking out pull branch: %v", err)
+	}
+
+	for _, test := range testcases {
+		t.Logf("Running test case %q...", test.name)
+		if err := lg.AddCommit("foo", "bar", test.pullFiles); err != nil {
+			t.Fatalf("Adding PR commit: %v", err)
+		}
+		gh := &ghc{
+			changes: []github.PullRequestChange{
+				{
+					Filename: "qux.go",
+					Patch:    test.codeChange,
+				},
+			},
+		}
+		if err := handle(0, gh, c, logrus.NewEntry(logrus.New()), e); err != nil {
+			t.Fatalf("Got error from handle: %v", err)
+		}
+
+		if test.comments == nil {
+			if len(gh.comment.Comments) > 0 {
+				t.Fatalf("Expected no comment, got %d: %v.", len(gh.comment.Comments), gh.comment.Comments)
+			}
+		} else {
+			if len(gh.comment.Comments) != len(test.comments) {
+				t.Fatalf("Expected one comments, got %d: %v.", len(gh.comment.Comments), gh.comment.Comments)
+			}
+			for _, testComment := range test.comments {
+				exists := false
+				for _, actualComment := range gh.comment.Comments {
+					if actualComment == testComment {
+						exists = true
+					}
+				}
+				if !exists {
+					t.Fatalf("Did not get back expected comment %v, actual comments are %v", testComment, gh.comment.Comments)
+				}
 			}
 		}
 	}
@@ -395,7 +668,15 @@ func TestAddedLines(t *testing.T) {
 }
 
 func TestModifiedGoFiles(t *testing.T) {
-	lg, c, err := localgit.New()
+	testModifiedGoFiles(localgit.New, t)
+}
+
+func TestModifiedGoFilesV2(t *testing.T) {
+	testModifiedGoFiles(localgit.NewV2, t)
+}
+
+func testModifiedGoFiles(clients localgit.Clients, t *testing.T) {
+	lg, c, err := clients()
 	if err != nil {
 		t.Fatalf("Making localgit: %v", err)
 	}
@@ -560,5 +841,42 @@ func TestModifiedGoFiles(t *testing.T) {
 		if !reflect.DeepEqual(tc.expectedModifiedFiles, actualModifiedFiles) {
 			t.Errorf("Expected: %#v, Got %#v in case %s.", tc.expectedModifiedFiles, actualModifiedFiles, tc.name)
 		}
+	}
+}
+
+func TestHelpProvider(t *testing.T) {
+	half := 0.5
+	enabledRepos := []config.OrgRepo{
+		{Org: "org1", Repo: "repo"},
+		{Org: "org2", Repo: "repo"},
+	}
+	cases := []struct {
+		name         string
+		config       *plugins.Configuration
+		enabledRepos []config.OrgRepo
+		err          bool
+	}{
+		{
+			name:         "Empty config",
+			config:       &plugins.Configuration{},
+			enabledRepos: enabledRepos,
+		},
+		{
+			name: "MinimumConfidence specified",
+			config: &plugins.Configuration{
+				Golint: plugins.Golint{
+					MinimumConfidence: &half,
+				},
+			},
+			enabledRepos: enabledRepos,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := helpProvider(c.config, c.enabledRepos)
+			if err != nil && !c.err {
+				t.Fatalf("helpProvider error: %v", err)
+			}
+		})
 	}
 }

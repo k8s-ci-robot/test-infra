@@ -18,55 +18,11 @@ package org
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
-)
 
-func TestRepoPermissionLevel(t *testing.T) {
-	get := func(v RepoPermissionLevel) *RepoPermissionLevel {
-		return &v
-	}
-	cases := []struct {
-		input    string
-		expected *RepoPermissionLevel
-	}{
-		{
-			"admin",
-			get(Admin),
-		},
-		{
-			"write",
-			get(Write),
-		},
-		{
-			"read",
-			get(Read),
-		},
-		{
-			"none",
-			get(None),
-		},
-		{
-			"",
-			nil,
-		},
-		{
-			"unknown",
-			nil,
-		},
-	}
-	for _, tc := range cases {
-		var actual RepoPermissionLevel
-		err := json.Unmarshal([]byte("\""+tc.input+"\""), &actual)
-		switch {
-		case err == nil && tc.expected == nil:
-			t.Errorf("%s: failed to receive an error", tc.input)
-		case err != nil && tc.expected != nil:
-			t.Errorf("%s: unexpected error: %v", tc.input, err)
-		case err == nil && *tc.expected != actual:
-			t.Errorf("%s: actual %v != expected %v", tc.input, tc.expected, actual)
-		}
-	}
-}
+	"k8s.io/apimachinery/pkg/util/diff"
+)
 
 func TestPrivacy(t *testing.T) {
 	get := func(v Privacy) *Privacy {
@@ -104,5 +60,74 @@ func TestPrivacy(t *testing.T) {
 		case err == nil && *tc.expected != actual:
 			t.Errorf("%s: actual %v != expected %v", tc.input, tc.expected, actual)
 		}
+	}
+}
+
+func TestPruneRepoDefaults(t *testing.T) {
+	empty := ""
+	nonEmpty := "string that is not empty"
+	yes := true
+	no := false
+	master := "master"
+	notMaster := "not-master"
+	testCases := []struct {
+		description string
+		repo        Repo
+		expected    Repo
+	}{
+		{
+			description: "default values are pruned",
+			repo: Repo{
+				Description:      &empty,
+				HomePage:         &empty,
+				Private:          &no,
+				HasIssues:        &yes,
+				HasProjects:      &yes,
+				HasWiki:          &yes,
+				AllowSquashMerge: &yes,
+				AllowMergeCommit: &yes,
+				AllowRebaseMerge: &yes,
+				DefaultBranch:    &master,
+				Archived:         &no,
+			},
+			expected: Repo{HasProjects: &yes},
+		},
+		{
+			description: "non-default values are not pruned",
+			repo: Repo{
+				Description:      &nonEmpty,
+				HomePage:         &nonEmpty,
+				Private:          &yes,
+				HasIssues:        &no,
+				HasProjects:      &no,
+				HasWiki:          &no,
+				AllowSquashMerge: &no,
+				AllowMergeCommit: &no,
+				AllowRebaseMerge: &no,
+				DefaultBranch:    &notMaster,
+				Archived:         &yes,
+			},
+			expected: Repo{Description: &nonEmpty,
+				HomePage:         &nonEmpty,
+				Private:          &yes,
+				HasIssues:        &no,
+				HasProjects:      &no,
+				HasWiki:          &no,
+				AllowSquashMerge: &no,
+				AllowMergeCommit: &no,
+				AllowRebaseMerge: &no,
+				DefaultBranch:    &notMaster,
+				Archived:         &yes,
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.description, func(t *testing.T) {
+			pruned := PruneRepoDefaults(tc.repo)
+			if !reflect.DeepEqual(tc.expected, pruned) {
+				t.Errorf("%s: result differs from expected:\n", diff.ObjectReflectDiff(tc.expected, pruned))
+			}
+		})
 	}
 }

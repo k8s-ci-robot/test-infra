@@ -21,11 +21,14 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"time"
+	"text/template"
 
 	"github.com/sirupsen/logrus"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/test-infra/prow/git/v2"
 	"k8s.io/test-infra/prow/github"
 )
 
@@ -35,43 +38,54 @@ type TideQueries []TideQuery
 // TideContextPolicy configures options about how to handle various contexts.
 type TideContextPolicy struct {
 	// whether to consider unknown contexts optional (skip) or required.
-	SkipUnknownContexts *bool    `json:"skip-unknown-contexts,omitempty"`
-	RequiredContexts    []string `json:"required-contexts,omitempty"`
-	OptionalContexts    []string `json:"optional-contexts,omitempty"`
+	SkipUnknownContexts       *bool    `json:"skip-unknown-contexts,omitempty"`
+	RequiredContexts          []string `json:"required-contexts,omitempty"`
+	RequiredIfPresentContexts []string `json:"required-if-present-contexts,omitempty"`
+	OptionalContexts          []string `json:"optional-contexts,omitempty"`
 	// Infer required and optional jobs from Branch Protection configuration
 	FromBranchProtection *bool `json:"from-branch-protection,omitempty"`
 }
 
 // TideOrgContextPolicy overrides the policy for an org, and any repo overrides.
 type TideOrgContextPolicy struct {
-	TideContextPolicy
-	Repos map[string]TideRepoContextPolicy `json:"repos,omitempty"`
+	TideContextPolicy `json:",inline"`
+	Repos             map[string]TideRepoContextPolicy `json:"repos,omitempty"`
 }
 
 // TideRepoContextPolicy overrides the policy for repo, and any branch overrides.
 type TideRepoContextPolicy struct {
-	TideContextPolicy
-	Branches map[string]TideContextPolicy `json:"branches,omitempty"`
+	TideContextPolicy `json:",inline"`
+	Branches          map[string]TideContextPolicy `json:"branches,omitempty"`
 }
 
 // TideContextPolicyOptions holds the default policy, and any org overrides.
 type TideContextPolicyOptions struct {
-	TideContextPolicy
-	// Github Orgs
+	TideContextPolicy `json:",inline"`
+	// GitHub Orgs
 	Orgs map[string]TideOrgContextPolicy `json:"orgs,omitempty"`
+}
+
+// TideMergeCommitTemplate holds templates to use for merge commits.
+type TideMergeCommitTemplate struct {
+	TitleTemplate string `json:"title,omitempty"`
+	BodyTemplate  string `json:"body,omitempty"`
+
+	Title *template.Template `json:"-"`
+	Body  *template.Template `json:"-"`
+}
+
+// TidePriority contains a list of labels used to prioritize PRs in the merge pool
+type TidePriority struct {
+	Labels []string `json:"labels,omitempty"`
 }
 
 // Tide is config for the tide pool.
 type Tide struct {
-	// SyncPeriodString compiles into SyncPeriod at load time.
-	SyncPeriodString string `json:"sync_period,omitempty"`
-	// SyncPeriod specifies how often Tide will sync jobs with Github. Defaults to 1m.
-	SyncPeriod time.Duration `json:"-"`
-	// StatusUpdatePeriodString compiles into StatusUpdatePeriod at load time.
-	StatusUpdatePeriodString string `json:"status_update_period,omitempty"`
-	// StatusUpdatePeriod specifies how often Tide will update Github status contexts.
+	// SyncPeriod specifies how often Tide will sync jobs with GitHub. Defaults to 1m.
+	SyncPeriod *metav1.Duration `json:"sync_period,omitempty"`
+	// StatusUpdatePeriod specifies how often Tide will update GitHub status contexts.
 	// Defaults to the value of SyncPeriod.
-	StatusUpdatePeriod time.Duration `json:"-"`
+	StatusUpdatePeriod *metav1.Duration `json:"status_update_period,omitempty"`
 	// Queries represents a list of GitHub search queries that collectively
 	// specify the set of PRs that meet merge requirements.
 	Queries TideQueries `json:"queries,omitempty"`
@@ -80,18 +94,33 @@ type Tide struct {
 	// the default method of merge. Valid options are squash, rebase, and merge.
 	MergeType map[string]github.PullRequestMergeType `json:"merge_method,omitempty"`
 
+	// A key/value pair of an org/repo as the key and Go template to override
+	// the default merge commit title and/or message. Template is passed the
+	// PullRequest struct (prow/github/types.go#PullRequest)
+	MergeTemplate map[string]TideMergeCommitTemplate `json:"merge_commit_template,omitempty"`
+
 	// URL for tide status contexts.
 	// We can consider allowing this to be set separately for separate repos, or
 	// allowing it to be a template.
 	TargetURL string `json:"target_url,omitempty"`
 
+	// TargetURLs is a map from "*", <org>, or <org/repo> to the URL for the tide status contexts.
+	// The most specific key that matches will be used.
+	// This field is mutually exclusive with TargetURL.
+	TargetURLs map[string]string `json:"target_urls,omitempty"`
+
 	// PRStatusBaseURL is the base URL for the PR status page.
 	// This is used to link to a merge requirements overview
 	// in the tide status context.
+	// Will be deprecated on June 2020.
 	PRStatusBaseURL string `json:"pr_status_base_url,omitempty"`
 
+	// PRStatusBaseURLs is the base URL for the PR status page
+	// mapped by org or org/repo level.
+	PRStatusBaseURLs map[string]string `json:"pr_status_base_urls,omitempty"`
+
 	// BlockerLabel is an optional label that is used to identify merge blocking
-	// Github issues.
+	// GitHub issues.
 	// Leave this blank to disable this feature and save 1 API token per sync loop.
 	BlockerLabel string `json:"blocker_label,omitempty"`
 
@@ -99,6 +128,16 @@ type Tide struct {
 	// always be squash merged.
 	// Leave this blank to disable this feature.
 	SquashLabel string `json:"squash_label,omitempty"`
+
+	// RebaseLabel is an optional label that is used to identify PRs that should
+	// always be rebased and merged.
+	// Leave this blank to disable this feature.
+	RebaseLabel string `json:"rebase_label,omitempty"`
+
+	// MergeLabel is an optional label that is used to identify PRs that should
+	// always be merged with all individual commits from the PR.
+	// Leave this blank to disable this feature.
+	MergeLabel string `json:"merge_label,omitempty"`
 
 	// MaxGoroutines is the maximum number of goroutines spawned inside the
 	// controller to handle org/repo:branch pools. Defaults to 20. Needs to be a
@@ -110,16 +149,76 @@ type Tide struct {
 	// combined status; otherwise it may apply the branch protection setting or let user
 	// define their own options in case branch protection is not used.
 	ContextOptions TideContextPolicyOptions `json:"context_options,omitempty"`
+
+	// BatchSizeLimitMap is a key/value pair of an org or org/repo as the key and
+	// integer batch size limit as the value. Use "*" as key to set a global default.
+	// Special values:
+	//  0 => unlimited batch size
+	// -1 => batch merging disabled :(
+	BatchSizeLimitMap map[string]int `json:"batch_size_limit,omitempty"`
+
+	// Priority is an ordered list of sets of labels that would be prioritized before other PRs
+	// PRs should match all labels contained in a set to be prioritized. The first entry has
+	// the highest priority.
+	Priority []TidePriority `json:"priority,omitempty"`
+
+	// PrioritizeExistingBatches configures on org or org/repo level if Tide should continue
+	// testing pre-existing batches instead of immediately including new PRs as they become
+	// eligible. Continuing on an old batch allows to re-use all existing test results whereas
+	// starting a new one requires to start new instances of all tests.
+	// Use '*' as key to set this globally. Defaults to true.
+	PrioritizeExistingBatchesMap map[string]bool `json:"prioritize_existing_batches,omitempty"`
+}
+
+func (t *Tide) mergeFrom(additional *Tide) error {
+	if t.MergeType == nil {
+		t.MergeType = additional.MergeType
+		return nil
+	}
+
+	var errs []error
+	for orgOrRepo, mergeMethod := range additional.MergeType {
+		if _, alreadyConfigured := t.MergeType[orgOrRepo]; alreadyConfigured {
+			errs = append(errs, fmt.Errorf("config for org or repo %s passed more than once", orgOrRepo))
+			continue
+		}
+		t.MergeType[orgOrRepo] = mergeMethod
+	}
+
+	return utilerrors.NewAggregate(errs)
+}
+
+func (t *Tide) PrioritizeExistingBatches(repo OrgRepo) bool {
+	if val, set := t.PrioritizeExistingBatchesMap[repo.String()]; set {
+		return val
+	}
+	if val, set := t.PrioritizeExistingBatchesMap[repo.Org]; set {
+		return val
+	}
+
+	if val, set := t.PrioritizeExistingBatchesMap["*"]; set {
+		return val
+	}
+
+	return true
+}
+
+func (t *Tide) BatchSizeLimit(repo OrgRepo) int {
+	if limit, ok := t.BatchSizeLimitMap[repo.String()]; ok {
+		return limit
+	}
+	if limit, ok := t.BatchSizeLimitMap[repo.Org]; ok {
+		return limit
+	}
+	return t.BatchSizeLimitMap["*"]
 }
 
 // MergeMethod returns the merge method to use for a repo. The default of merge is
 // returned when not overridden.
-func (t *Tide) MergeMethod(org, repo string) github.PullRequestMergeType {
-	name := org + "/" + repo
-
-	v, ok := t.MergeType[name]
+func (t *Tide) MergeMethod(repo OrgRepo) github.PullRequestMergeType {
+	v, ok := t.MergeType[repo.String()]
 	if !ok {
-		if ov, found := t.MergeType[org]; found {
+		if ov, found := t.MergeType[repo.Org]; found {
 			return ov
 		}
 
@@ -129,74 +228,152 @@ func (t *Tide) MergeMethod(org, repo string) github.PullRequestMergeType {
 	return v
 }
 
+// MergeCommitTemplate returns a struct with Go template string(s) or nil
+func (t *Tide) MergeCommitTemplate(repo OrgRepo) TideMergeCommitTemplate {
+	v, ok := t.MergeTemplate[repo.String()]
+	if !ok {
+		return t.MergeTemplate[repo.Org]
+	}
+
+	return v
+}
+
+func (t *Tide) GetPRStatusBaseURL(repo OrgRepo) string {
+	if byOrgRepo, ok := t.PRStatusBaseURLs[repo.String()]; ok {
+		return byOrgRepo
+	}
+	if byOrg, ok := t.PRStatusBaseURLs[repo.Org]; ok {
+		return byOrg
+	}
+
+	return t.PRStatusBaseURLs["*"]
+}
+
+func (t *Tide) GetTargetURL(repo OrgRepo) string {
+	if byOrgRepo, ok := t.TargetURLs[repo.String()]; ok {
+		return byOrgRepo
+	}
+	if byOrg, ok := t.TargetURLs[repo.Org]; ok {
+		return byOrg
+	}
+
+	return t.TargetURLs["*"]
+}
+
 // TideQuery is turned into a GitHub search query. See the docs for details:
 // https://help.github.com/articles/searching-issues-and-pull-requests/
 type TideQuery struct {
-	Orgs          []string `json:"orgs,omitempty"`
-	Repos         []string `json:"repos,omitempty"`
-	ExcludedRepos []string `json:"excludedRepos,omitempty"`
-
-	ExcludedBranches []string `json:"excludedBranches,omitempty"`
-	IncludedBranches []string `json:"includedBranches,omitempty"`
+	Author string `json:"author,omitempty"`
 
 	Labels        []string `json:"labels,omitempty"`
 	MissingLabels []string `json:"missingLabels,omitempty"`
 
+	ExcludedBranches []string `json:"excludedBranches,omitempty"`
+	IncludedBranches []string `json:"includedBranches,omitempty"`
+
 	Milestone string `json:"milestone,omitempty"`
 
 	ReviewApprovedRequired bool `json:"reviewApprovedRequired,omitempty"`
+
+	Orgs          []string `json:"orgs,omitempty"`
+	Repos         []string `json:"repos,omitempty"`
+	ExcludedRepos []string `json:"excludedRepos,omitempty"`
+}
+
+// constructQuery returns a map[org][]orgSpecificQueryParts (org, repo, -repo), remainingQueryString
+func (tq *TideQuery) constructQuery() (map[string][]string, string) {
+	// map org->repo directives (if any)
+	orgScopedIdentifiers := map[string][]string{}
+	for _, o := range tq.Orgs {
+		if _, ok := orgScopedIdentifiers[o]; !ok {
+			orgScopedIdentifiers[o] = []string{fmt.Sprintf(`org:"%s"`, o)}
+		}
+	}
+	for _, r := range tq.Repos {
+		if org, _, ok := splitOrgRepoString(r); ok {
+			orgScopedIdentifiers[org] = append(orgScopedIdentifiers[org], fmt.Sprintf("repo:\"%s\"", r))
+		}
+	}
+
+	for _, r := range tq.ExcludedRepos {
+		if org, _, ok := splitOrgRepoString(r); ok {
+			orgScopedIdentifiers[org] = append(orgScopedIdentifiers[org], fmt.Sprintf("-repo:\"%s\"", r))
+		}
+	}
+
+	queryString := []string{"is:pr", "state:open", "archived:false"}
+	if tq.Author != "" {
+		queryString = append(queryString, fmt.Sprintf("author:\"%s\"", tq.Author))
+	}
+	for _, b := range tq.ExcludedBranches {
+		queryString = append(queryString, fmt.Sprintf("-base:\"%s\"", b))
+	}
+	for _, b := range tq.IncludedBranches {
+		queryString = append(queryString, fmt.Sprintf("base:\"%s\"", b))
+	}
+	for _, l := range tq.Labels {
+		queryString = append(queryString, fmt.Sprintf("label:\"%s\"", l))
+	}
+	for _, l := range tq.MissingLabels {
+		queryString = append(queryString, fmt.Sprintf("-label:\"%s\"", l))
+	}
+	if tq.Milestone != "" {
+		queryString = append(queryString, fmt.Sprintf("milestone:\"%s\"", tq.Milestone))
+	}
+	if tq.ReviewApprovedRequired {
+		queryString = append(queryString, "review:approved")
+	}
+
+	return orgScopedIdentifiers, strings.Join(queryString, " ")
+}
+
+func splitOrgRepoString(orgRepo string) (string, string, bool) {
+	split := strings.Split(orgRepo, "/")
+	if len(split) != 2 {
+		// Just do it like the github search itself and ignore invalid orgRepo identifiers
+		return "", "", false
+	}
+	return split[0], split[1], true
+}
+
+// OrgQueries returns the GitHub search string for the query, sharded
+// by org.
+func (tq *TideQuery) OrgQueries() map[string]string {
+	orgRepoIdentifiers, queryString := tq.constructQuery()
+	result := map[string]string{}
+	for org, repoIdentifiers := range orgRepoIdentifiers {
+		result[org] = queryString + " " + strings.Join(repoIdentifiers, " ")
+	}
+
+	return result
 }
 
 // Query returns the corresponding github search string for the tide query.
 func (tq *TideQuery) Query() string {
-	toks := []string{"is:pr", "state:open"}
-	for _, o := range tq.Orgs {
-		toks = append(toks, fmt.Sprintf("org:\"%s\"", o))
-	}
-	for _, r := range tq.Repos {
-		toks = append(toks, fmt.Sprintf("repo:\"%s\"", r))
-	}
-	for _, r := range tq.ExcludedRepos {
-		toks = append(toks, fmt.Sprintf("-repo:\"%s\"", r))
-	}
-	for _, b := range tq.ExcludedBranches {
-		toks = append(toks, fmt.Sprintf("-base:\"%s\"", b))
-	}
-	for _, b := range tq.IncludedBranches {
-		toks = append(toks, fmt.Sprintf("base:\"%s\"", b))
-	}
-	for _, l := range tq.Labels {
-		toks = append(toks, fmt.Sprintf("label:\"%s\"", l))
-	}
-	for _, l := range tq.MissingLabels {
-		toks = append(toks, fmt.Sprintf("-label:\"%s\"", l))
-	}
-	if tq.Milestone != "" {
-		toks = append(toks, fmt.Sprintf("milestone:\"%s\"", tq.Milestone))
-	}
-	if tq.ReviewApprovedRequired {
-		toks = append(toks, "review:approved")
+	orgRepoIdentifiers, queryString := tq.constructQuery()
+	toks := []string{queryString}
+	for _, repoIdentifiers := range orgRepoIdentifiers {
+		toks = append(toks, repoIdentifiers...)
 	}
 	return strings.Join(toks, " ")
 }
 
 // ForRepo indicates if the tide query applies to the specified repo.
-func (tq TideQuery) ForRepo(org, repo string) bool {
-	fullName := fmt.Sprintf("%s/%s", org, repo)
+func (tq TideQuery) ForRepo(repo OrgRepo) bool {
 	for _, queryOrg := range tq.Orgs {
-		if queryOrg != org {
+		if queryOrg != repo.Org {
 			continue
 		}
 		// Check for repos excluded from the org.
 		for _, excludedRepo := range tq.ExcludedRepos {
-			if excludedRepo == fullName {
+			if excludedRepo == repo.String() {
 				return false
 			}
 		}
 		return true
 	}
 	for _, queryRepo := range tq.Repos {
-		if queryRepo == fullName {
+		if queryRepo == repo.String() {
 			return true
 		}
 	}
@@ -263,24 +440,23 @@ func (tqs TideQueries) QueryMap() *QueryMap {
 }
 
 // ForRepo returns the tide queries that apply to a repo.
-func (qm *QueryMap) ForRepo(org, repo string) TideQueries {
+func (qm *QueryMap) ForRepo(repo OrgRepo) TideQueries {
 	res := TideQueries(nil)
-	fullName := fmt.Sprintf("%s/%s", org, repo)
 
 	qm.Lock()
 	defer qm.Unlock()
 
-	if qs, ok := qm.cache[fullName]; ok {
+	if qs, ok := qm.cache[repo.String()]; ok {
 		return append(res, qs...) // Return a copy.
 	}
 	// Cache miss. Need to determine relevant queries.
 
 	for _, query := range qm.queries {
-		if query.ForRepo(org, repo) {
+		if query.ForRepo(repo) {
 			res = append(res, query)
 		}
 	}
-	qm.cache[fullName] = res
+	qm.cache[repo.String()] = res
 	return res
 }
 
@@ -377,11 +553,16 @@ func (tq *TideQuery) Validate() error {
 	return nil
 }
 
-// Validate returns an error if any contexts are both required and optional.
+// Validate returns an error if any contexts are listed more than once in the config.
 func (cp *TideContextPolicy) Validate() error {
-	inter := sets.NewString(cp.RequiredContexts...).Intersection(sets.NewString(cp.OptionalContexts...))
-	if inter.Len() > 0 {
-		return fmt.Errorf("contexts %s are defined has required and optional", strings.Join(inter.List(), ", "))
+	if inter := sets.NewString(cp.RequiredContexts...).Intersection(sets.NewString(cp.OptionalContexts...)); inter.Len() > 0 {
+		return fmt.Errorf("contexts %s are defined as required and optional", strings.Join(inter.List(), ", "))
+	}
+	if inter := sets.NewString(cp.RequiredContexts...).Intersection(sets.NewString(cp.RequiredIfPresentContexts...)); inter.Len() > 0 {
+		return fmt.Errorf("contexts %s are defined as required and required if present", strings.Join(inter.List(), ", "))
+	}
+	if inter := sets.NewString(cp.OptionalContexts...).Intersection(sets.NewString(cp.RequiredIfPresentContexts...)); inter.Len() > 0 {
+		return fmt.Errorf("contexts %s are defined as optional and required if present", strings.Join(inter.List(), ", "))
 	}
 	return nil
 }
@@ -397,11 +578,16 @@ func mergeTideContextPolicy(a, b TideContextPolicy) TideContextPolicy {
 	c.FromBranchProtection = mergeBool(a.FromBranchProtection, b.FromBranchProtection)
 	c.SkipUnknownContexts = mergeBool(a.SkipUnknownContexts, b.SkipUnknownContexts)
 	required := sets.NewString(a.RequiredContexts...)
+	requiredIfPresent := sets.NewString(a.RequiredIfPresentContexts...)
 	optional := sets.NewString(a.OptionalContexts...)
 	required.Insert(b.RequiredContexts...)
+	requiredIfPresent.Insert(b.RequiredIfPresentContexts...)
 	optional.Insert(b.OptionalContexts...)
 	if required.Len() > 0 {
 		c.RequiredContexts = required.List()
+	}
+	if requiredIfPresent.Len() > 0 {
+		c.RequiredIfPresentContexts = requiredIfPresent.List()
 	}
 	if optional.Len() > 0 {
 		c.OptionalContexts = optional.List()
@@ -426,33 +612,42 @@ func parseTideContextPolicyOptions(org, repo, branch string, options TideContext
 // GetTideContextPolicy parses the prow config to find context merge options.
 // If none are set, it will use the prow jobs configured and use the default github combined status.
 // Otherwise if set it will use the branch protection setting, or the listed jobs.
-func (c Config) GetTideContextPolicy(org, repo, branch string) (*TideContextPolicy, error) {
+func (c Config) GetTideContextPolicy(gitClient git.ClientFactory, org, repo, branch string, baseSHAGetter RefGetter, headSHA string) (*TideContextPolicy, error) {
 	options := parseTideContextPolicyOptions(org, repo, branch, c.Tide.ContextOptions)
 	// Adding required and optional contexts from options
 	required := sets.NewString(options.RequiredContexts...)
+	requiredIfPresent := sets.NewString(options.RequiredIfPresentContexts...)
 	optional := sets.NewString(options.OptionalContexts...)
 
+	headSHAGetter := func() (string, error) {
+		return headSHA, nil
+	}
+	presubmits, err := c.GetPresubmits(gitClient, org+"/"+repo, baseSHAGetter, headSHAGetter)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get presubmits: %v", err)
+	}
+
 	// automatically generate required and optional entries for Prow Jobs
-	prowRequired, prowOptional := BranchRequirements(org, repo, branch, c.Presubmits)
+	prowRequired, prowRequiredIfPresent, prowOptional := BranchRequirements(branch, presubmits)
 	required.Insert(prowRequired...)
+	requiredIfPresent.Insert(prowRequiredIfPresent...)
 	optional.Insert(prowOptional...)
 
 	// Using Branch protection configuration
 	if options.FromBranchProtection != nil && *options.FromBranchProtection {
-		bp, err := c.GetBranchProtection(org, repo, branch)
+		bp, err := c.GetBranchProtection(org, repo, branch, presubmits)
 		if err != nil {
 			logrus.WithError(err).Warningf("Error getting branch protection for %s/%s+%s", org, repo, branch)
-		} else if bp == nil {
-			logrus.Warningf("branch protection not set for %s/%s+%s", org, repo, branch)
-		} else if bp.Protect != nil && *bp.Protect {
+		} else if bp != nil && bp.Protect != nil && *bp.Protect && bp.RequiredStatusChecks != nil {
 			required.Insert(bp.RequiredStatusChecks.Contexts...)
 		}
 	}
 
 	t := &TideContextPolicy{
-		RequiredContexts:    required.List(),
-		OptionalContexts:    optional.List(),
-		SkipUnknownContexts: options.SkipUnknownContexts,
+		RequiredContexts:          required.List(),
+		RequiredIfPresentContexts: requiredIfPresent.List(),
+		OptionalContexts:          optional.List(),
+		SkipUnknownContexts:       options.SkipUnknownContexts,
 	}
 	if err := t.Validate(); err != nil {
 		return t, err
@@ -470,6 +665,10 @@ func (cp *TideContextPolicy) IsOptional(c string) bool {
 		return true
 	}
 	if sets.NewString(cp.RequiredContexts...).Has(c) {
+		return false
+	}
+	// assume if we're asking that the context is present on the PR
+	if sets.NewString(cp.RequiredIfPresentContexts...).Has(c) {
 		return false
 	}
 	if cp.SkipUnknownContexts != nil && *cp.SkipUnknownContexts {

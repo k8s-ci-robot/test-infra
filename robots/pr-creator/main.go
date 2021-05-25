@@ -23,26 +23,29 @@ import (
 	"os"
 	"strings"
 
-	"k8s.io/test-infra/prow/config"
-	"k8s.io/test-infra/prow/flagutil"
-	"k8s.io/test-infra/prow/github"
-
 	"github.com/sirupsen/logrus"
+
+	"k8s.io/test-infra/prow/config/secret"
+	"k8s.io/test-infra/prow/flagutil"
+	"k8s.io/test-infra/robots/pr-creator/updater"
 )
 
 type options struct {
 	github flagutil.GitHubOptions
 
-	branch  string
-	confirm bool
-	local   bool
-	org     string
-	repo    string
-	source  string
+	branch    string
+	allowMods bool
+	confirm   bool
+	local     bool
+	org       string
+	repo      string
+	source    string
 
 	title      string
+	headBranch string
 	matchTitle string
 	body       string
+	labels     string
 }
 
 func (o options) validate() error {
@@ -64,20 +67,30 @@ func (o options) validate() error {
 	return nil
 }
 
+func (o options) getLabels() []string {
+	if o.labels != "" {
+		return strings.Split(o.labels, ",")
+	}
+	return nil
+}
+
 func optionsFromFlags() options {
 	var o options
 	fs := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
 	o.github.AddFlags(fs)
-	fs.StringVar(&o.repo, "repo", "", "Github repo")
-	fs.StringVar(&o.org, "org", "", "Github org")
+	fs.StringVar(&o.repo, "repo", "", "GitHub repo")
+	fs.StringVar(&o.org, "org", "", "GitHub org")
 	fs.StringVar(&o.branch, "branch", "", "Repo branch to merge into")
 	fs.StringVar(&o.source, "source", "", "The user:branch to merge from")
 
+	fs.BoolVar(&o.allowMods, "allow-mods", updater.PreventMods, "Indicates whether maintainers can modify the pull request")
 	fs.BoolVar(&o.confirm, "confirm", false, "Set to mutate github instead of a dry run")
 	fs.BoolVar(&o.local, "local", false, "Allow source to be local-branch instead of remote-user:branch")
 	fs.StringVar(&o.title, "title", "", "Title of PR")
-	fs.StringVar(&o.matchTitle, "match-title", "", "Reuse any self-authored, open PR matching title")
+	fs.StringVar(&o.headBranch, "head-branch", "", "Reuse any self-authored open PR from this branch. This takes priority over match-title")
+	fs.StringVar(&o.matchTitle, "match-title", "", "Reuse any self-autohred open PR that matches this title. If both this and head-branch are set, this will be overwritten by head-branch")
 	fs.StringVar(&o.body, "body", "", "Body of PR")
+	fs.StringVar(&o.labels, "labels", "", "labels to attach to PR")
 	fs.Parse(os.Args[1:])
 	return o
 }
@@ -88,66 +101,28 @@ func main() {
 		logrus.WithError(err).Fatal("bad flags")
 	}
 
-	var jamesBond config.SecretAgent
+	jamesBond := &secret.Agent{}
 	if err := jamesBond.Start([]string{o.github.TokenPath}); err != nil {
 		logrus.WithError(err).Fatal("Failed to start secrets agent")
 	}
 
-	gc, err := o.github.GitHubClient(&jamesBond, !o.confirm)
+	gc, err := o.github.GitHubClient(jamesBond, !o.confirm)
 	if err != nil {
 		logrus.WithError(err).Fatal("Failed to create github client")
 	}
 
-	n, err := updatePR(o, gc)
-	if err != nil {
-		logrus.WithError(err).Fatalf("Failed to update %d", n)
+	var queryTokensString string
+	// Prioritize using headBranch as it is less flakey
+	if o.headBranch != "" {
+		queryTokensString = "head:" + o.headBranch
+	} else {
+		queryTokensString = "in:title " + o.matchTitle
 	}
-	if n == nil {
-		allowMods := true
-		pr, err := gc.CreatePullRequest(o.org, o.repo, o.title, o.body, o.source, o.branch, allowMods)
-		if err != nil {
-			logrus.WithError(err).Fatal("Failed to create PR")
-		}
-		n = &pr
+	n, err := updater.EnsurePRWithQueryTokensAndLabels(o.org, o.repo, o.title, o.body, o.source, o.branch, queryTokensString, o.allowMods, o.getLabels(), gc)
+	if err != nil {
+		logrus.WithError(err).Fatal("Failed to ensure PR exists.")
 	}
 
 	logrus.Infof("PR %s/%s#%d will merge %s into %s: %s", o.org, o.repo, *n, o.source, o.branch, o.title)
-
 	fmt.Println(*n)
-}
-
-type updateClient interface {
-	UpdatePullRequest(org, repo string, number int, title, body *string, open *bool, branch *string, canModify *bool) error
-	BotName() (string, error)
-	FindIssues(query, sort string, asc bool) ([]github.Issue, error)
-}
-
-func updatePR(o options, gc updateClient) (*int, error) {
-	if o.matchTitle == "" {
-		return nil, nil
-	}
-
-	logrus.Info("Looking for a PR to reuse...")
-	me, err := gc.BotName()
-	if err != nil {
-		return nil, fmt.Errorf("bot name: %v", err)
-	}
-
-	issues, err := gc.FindIssues("is:open is:pr archived:false in:title author:"+me+" "+o.matchTitle, "updated", true)
-	if err != nil {
-		return nil, fmt.Errorf("find issues: %v", err)
-	} else if len(issues) == 0 {
-		logrus.Info("No reusable issues found")
-		return nil, nil
-	}
-	n := issues[0].Number
-	logrus.Infof("Found %d", n)
-	var ignoreOpen *bool
-	var ignoreBranch *string
-	var ignoreModify *bool
-	if err := gc.UpdatePullRequest(o.org, o.repo, n, &o.title, &o.body, ignoreOpen, ignoreBranch, ignoreModify); err != nil {
-		return nil, fmt.Errorf("update %d: %v", n, err)
-	}
-
-	return &n, nil
 }

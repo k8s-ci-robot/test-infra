@@ -17,53 +17,82 @@ limitations under the License.
 package blunderbuss
 
 import (
+	"context"
 	"fmt"
-	"math"
-	"math/rand"
-	"sort"
+	"regexp"
 
+	githubql "github.com/shurcooL/githubv4"
 	"github.com/sirupsen/logrus"
-
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/test-infra/prow/pkg/layeredsets"
+
+	"k8s.io/test-infra/prow/config"
 	"k8s.io/test-infra/prow/github"
 	"k8s.io/test-infra/prow/pluginhelp"
 	"k8s.io/test-infra/prow/plugins"
 	"k8s.io/test-infra/prow/plugins/assign"
+	"k8s.io/test-infra/prow/repoowners"
 )
 
 const (
-	// PluginName is the name for this plugin
+	// PluginName defines this plugin's registered name.
 	PluginName = "blunderbuss"
 )
 
+var (
+	match = regexp.MustCompile(`(?mi)^/auto-cc\s*$`)
+)
+
 func init() {
-	plugins.RegisterPullRequestHandler(PluginName, handlePullRequest, helpProvider)
+	plugins.RegisterPullRequestHandler(PluginName, handlePullRequestEvent, helpProvider)
+	plugins.RegisterGenericCommentHandler(PluginName, handleGenericCommentEvent, helpProvider)
 }
 
-func helpProvider(config *plugins.Configuration, enabledRepos []string) (*pluginhelp.PluginHelp, error) {
+func configString(reviewCount int) string {
 	var pluralSuffix string
+	if reviewCount > 1 {
+		pluralSuffix = "s"
+	}
+	return fmt.Sprintf("Blunderbuss is currently configured to request reviews from %d reviewer%s.", reviewCount, pluralSuffix)
+}
+
+func helpProvider(config *plugins.Configuration, _ []config.OrgRepo) (*pluginhelp.PluginHelp, error) {
 	var reviewCount int
 	if config.Blunderbuss.ReviewerCount != nil {
 		reviewCount = *config.Blunderbuss.ReviewerCount
-	} else if config.Blunderbuss.ReviewerCount != nil {
-		reviewCount = *config.Blunderbuss.FileWeightCount
 	}
-	if reviewCount != 1 {
-		pluralSuffix = "s"
-	}
-	// Omit the fields [WhoCanUse, Usage, Examples] because this plugin is not triggered by human actions.
-	return &pluginhelp.PluginHelp{
-			Description: "The blunderbuss plugin automatically requests reviews from reviewers when a new PR is created. The reviewers are selected based on the reviewers specified in the OWNERS files that apply to the files modified by the PR.",
-			Config: map[string]string{
-				"": fmt.Sprintf("Blunderbuss is currently configured to request reviews from %d reviewer%s.", reviewCount, pluralSuffix),
-			},
+	two := 2
+	yamlSnippet, err := plugins.CommentMap.GenYaml(&plugins.Configuration{
+		Blunderbuss: plugins.Blunderbuss{
+			ReviewerCount:         &two,
+			MaxReviewerCount:      3,
+			ExcludeApprovers:      true,
+			UseStatusAvailability: true,
 		},
-		nil
+	})
+	if err != nil {
+		logrus.WithError(err).Warnf("cannot generate comments for %s plugin", PluginName)
+	}
+	pluginHelp := &pluginhelp.PluginHelp{
+		Description: "The blunderbuss plugin automatically requests reviews from reviewers when a new PR is created. The reviewers are selected based on the reviewers specified in the OWNERS files that apply to the files modified by the PR.",
+		Config: map[string]string{
+			"": configString(reviewCount),
+		},
+		Snippet: yamlSnippet,
+	}
+	pluginHelp.AddCommand(pluginhelp.Command{
+		Usage:       "/auto-cc",
+		Featured:    false,
+		Description: "Manually request reviews from reviewers for a PR. Useful if OWNERS file were updated since the PR was opened.",
+		Examples:    []string{"/auto-cc"},
+		WhoCanUse:   "Anyone",
+	})
+	return pluginHelp, nil
 }
 
 type reviewersClient interface {
 	FindReviewersOwnersForFile(path string) string
-	Reviewers(path string) sets.String
+	Reviewers(path string) layeredsets.String
 	RequiredReviewers(path string) sets.String
 	LeafReviewers(path string) sets.String
 }
@@ -71,7 +100,7 @@ type reviewersClient interface {
 type ownersClient interface {
 	reviewersClient
 	FindApproverOwnersForFile(path string) string
-	Approvers(path string) sets.String
+	Approvers(path string) layeredsets.String
 	LeafApprovers(path string) sets.String
 }
 
@@ -83,7 +112,7 @@ func (foc fallbackReviewersClient) FindReviewersOwnersForFile(path string) strin
 	return foc.ownersClient.FindApproverOwnersForFile(path)
 }
 
-func (foc fallbackReviewersClient) Reviewers(path string) sets.String {
+func (foc fallbackReviewersClient) Reviewers(path string) layeredsets.String {
 	return foc.ownersClient.Approvers(path)
 }
 
@@ -94,42 +123,101 @@ func (foc fallbackReviewersClient) LeafReviewers(path string) sets.String {
 type githubClient interface {
 	RequestReview(org, repo string, number int, logins []string) error
 	GetPullRequestChanges(org, repo string, number int) ([]github.PullRequestChange, error)
+	GetPullRequest(org, repo string, number int) (*github.PullRequest, error)
+	Query(context.Context, interface{}, map[string]interface{}) error
 }
 
-func handlePullRequest(pc plugins.Agent, pre github.PullRequestEvent) error {
-	if pre.Action != github.PullRequestActionOpened || assign.CCRegexp.MatchString(pre.PullRequest.Body) {
+type repoownersClient interface {
+	LoadRepoOwners(org, repo, base string) (repoowners.RepoOwner, error)
+}
+
+func handlePullRequestEvent(pc plugins.Agent, pre github.PullRequestEvent) error {
+	return handlePullRequest(
+		pc.GitHubClient,
+		pc.OwnersClient,
+		pc.Logger,
+		pc.PluginConfig.Blunderbuss,
+		pre.Action,
+		&pre.PullRequest,
+		&pre.Repo,
+	)
+}
+
+func handlePullRequest(ghc githubClient, roc repoownersClient, log *logrus.Entry, config plugins.Blunderbuss, action github.PullRequestEventAction, pr *github.PullRequest, repo *github.Repo) error {
+	if action != github.PullRequestActionOpened || assign.CCRegexp.MatchString(pr.Body) {
 		return nil
 	}
 
-	oc, err := pc.OwnersClient.LoadRepoOwners(pre.Repo.Owner.Login, pre.Repo.Name, pre.PullRequest.Base.Ref)
+	return handle(
+		ghc,
+		roc,
+		log,
+		config.ReviewerCount,
+		config.MaxReviewerCount,
+		config.ExcludeApprovers,
+		config.UseStatusAvailability,
+		repo,
+		pr,
+	)
+}
+
+func handleGenericCommentEvent(pc plugins.Agent, ce github.GenericCommentEvent) error {
+	return handleGenericComment(
+		pc.GitHubClient,
+		pc.OwnersClient,
+		pc.Logger,
+		pc.PluginConfig.Blunderbuss,
+		ce.Action,
+		ce.IsPR,
+		ce.Number,
+		ce.IssueState,
+		&ce.Repo,
+		ce.Body,
+	)
+}
+
+func handleGenericComment(ghc githubClient, roc repoownersClient, log *logrus.Entry, config plugins.Blunderbuss, action github.GenericCommentEventAction, isPR bool, prNumber int, issueState string, repo *github.Repo, body string) error {
+	if action != github.GenericCommentActionCreated || !isPR || issueState == "closed" {
+		return nil
+	}
+
+	if !match.MatchString(body) {
+		return nil
+	}
+
+	pr, err := ghc.GetPullRequest(repo.Owner.Login, repo.Name, prNumber)
+	if err != nil {
+		return fmt.Errorf("error loading PullRequest: %v", err)
+	}
+
+	return handle(
+		ghc,
+		roc,
+		log,
+		config.ReviewerCount,
+		config.MaxReviewerCount,
+		config.ExcludeApprovers,
+		config.UseStatusAvailability,
+		repo,
+		pr,
+	)
+}
+
+func handle(ghc githubClient, roc repoownersClient, log *logrus.Entry, reviewerCount *int, maxReviewers int, excludeApprovers bool, useStatusAvailability bool, repo *github.Repo, pr *github.PullRequest) error {
+	oc, err := roc.LoadRepoOwners(repo.Owner.Login, repo.Name, pr.Base.Ref)
 	if err != nil {
 		return fmt.Errorf("error loading RepoOwners: %v", err)
 	}
 
-	return handle(
-		pc.GitHubClient,
-		oc, pc.Logger,
-		pc.PluginConfig.Blunderbuss.ReviewerCount,
-		pc.PluginConfig.Blunderbuss.FileWeightCount,
-		pc.PluginConfig.Blunderbuss.MaxReviewerCount,
-		pc.PluginConfig.Blunderbuss.ExcludeApprovers,
-		&pre,
-	)
-}
-
-func handle(ghc githubClient, oc ownersClient, log *logrus.Entry, reviewerCount, oldReviewCount *int, maxReviewers int, excludeApprovers bool, pre *github.PullRequestEvent) error {
-	changes, err := ghc.GetPullRequestChanges(pre.Repo.Owner.Login, pre.Repo.Name, pre.Number)
+	changes, err := ghc.GetPullRequestChanges(repo.Owner.Login, repo.Name, pr.Number)
 	if err != nil {
 		return fmt.Errorf("error getting PR changes: %v", err)
 	}
 
 	var reviewers []string
 	var requiredReviewers []string
-	switch {
-	case oldReviewCount != nil:
-		reviewers = getReviewersOld(log, oc, pre.PullRequest.User.Login, changes, *oldReviewCount)
-	case reviewerCount != nil:
-		reviewers, requiredReviewers, err = getReviewers(oc, pre.PullRequest.User.Login, changes, *reviewerCount)
+	if reviewerCount != nil {
+		reviewers, requiredReviewers, err = getReviewers(oc, ghc, log, pr.User.Login, changes, *reviewerCount, useStatusAvailability)
 		if err != nil {
 			return err
 		}
@@ -140,18 +228,24 @@ func handle(ghc githubClient, oc ownersClient, log *logrus.Entry, reviewerCount,
 				// and approvers and the search might stop too early if it finds
 				// duplicates.
 				frc := fallbackReviewersClient{ownersClient: oc}
-				approvers, _, err := getReviewers(frc, pre.PullRequest.User.Login, changes, *reviewerCount)
+				approvers, _, err := getReviewers(frc, ghc, log, pr.User.Login, changes, *reviewerCount, useStatusAvailability)
 				if err != nil {
 					return err
 				}
+				var added int
 				combinedReviewers := sets.NewString(reviewers...)
-				combinedReviewers.Insert(approvers...)
-				log.Infof("Added %d approvers as reviewers. %d/%d reviewers found.", combinedReviewers.Len()-len(reviewers), combinedReviewers.Len(), *reviewerCount)
-				reviewers = combinedReviewers.List()
+				for _, approver := range approvers {
+					if !combinedReviewers.Has(approver) {
+						reviewers = append(reviewers, approver)
+						combinedReviewers.Insert(approver)
+						added++
+					}
+				}
+				log.Infof("Added %d approvers as reviewers. %d/%d reviewers found.", added, combinedReviewers.Len(), *reviewerCount)
 			}
 		}
 		if missing := *reviewerCount - len(reviewers); missing > 0 {
-			log.Warnf("Not enough reviewers found in OWNERS files for files touched by this PR. %d/%d reviewers found.", len(reviewers), *reviewerCount)
+			log.Debugf("Not enough reviewers found in OWNERS files for files touched by this PR. %d/%d reviewers found.", len(reviewers), *reviewerCount)
 		}
 	}
 
@@ -165,16 +259,17 @@ func handle(ghc githubClient, oc ownersClient, log *logrus.Entry, reviewerCount,
 
 	if len(reviewers) > 0 {
 		log.Infof("Requesting reviews from users %s.", reviewers)
-		return ghc.RequestReview(pre.Repo.Owner.Login, pre.Repo.Name, pre.Number, reviewers)
+		return ghc.RequestReview(repo.Owner.Login, repo.Name, pr.Number, reviewers)
 	}
 	return nil
 }
 
-func getReviewers(rc reviewersClient, author string, files []github.PullRequestChange, minReviewers int) ([]string, []string, error) {
-	authorSet := sets.NewString(author)
-	reviewers := sets.NewString()
+func getReviewers(rc reviewersClient, ghc githubClient, log *logrus.Entry, author string, files []github.PullRequestChange, minReviewers int, useStatusAvailability bool) ([]string, []string, error) {
+	authorSet := sets.NewString(github.NormLogin(author))
+	reviewers := layeredsets.NewString()
 	requiredReviewers := sets.NewString()
-	leafReviewers := sets.NewString()
+	leafReviewers := layeredsets.NewString()
+	busyReviewers := sets.NewString()
 	ownersSeen := sets.NewString()
 	// first build 'reviewers' by taking a unique reviewer from each OWNERS file.
 	for _, file := range files {
@@ -187,17 +282,21 @@ func getReviewers(rc reviewersClient, author string, files []github.PullRequestC
 		// record required reviewers if any
 		requiredReviewers.Insert(rc.RequiredReviewers(file.Filename).UnsortedList()...)
 
-		fileUnusedLeafs := rc.LeafReviewers(file.Filename).Difference(reviewers).Difference(authorSet)
+		fileUnusedLeafs := layeredsets.NewString(rc.LeafReviewers(file.Filename).List()...).Difference(reviewers.Set()).Difference(authorSet)
 		if fileUnusedLeafs.Len() == 0 {
 			continue
 		}
 		leafReviewers = leafReviewers.Union(fileUnusedLeafs)
-		reviewers.Insert(popRandom(fileUnusedLeafs))
+		if r := findReviewer(ghc, log, useStatusAvailability, &busyReviewers, &fileUnusedLeafs); r != "" {
+			reviewers.Insert(0, r)
+		}
 	}
 	// now ensure that we request review from at least minReviewers reviewers. Favor leaf reviewers.
-	unusedLeafs := leafReviewers.Difference(reviewers)
+	unusedLeafs := leafReviewers.Difference(reviewers.Set())
 	for reviewers.Len() < minReviewers && unusedLeafs.Len() > 0 {
-		reviewers.Insert(popRandom(unusedLeafs))
+		if r := findReviewer(ghc, log, useStatusAvailability, &busyReviewers, &unusedLeafs); r != "" {
+			reviewers.Insert(1, r)
+		}
 	}
 	for _, file := range files {
 		if reviewers.Len() >= minReviewers {
@@ -205,107 +304,61 @@ func getReviewers(rc reviewersClient, author string, files []github.PullRequestC
 		}
 		fileReviewers := rc.Reviewers(file.Filename).Difference(authorSet)
 		for reviewers.Len() < minReviewers && fileReviewers.Len() > 0 {
-			reviewers.Insert(popRandom(fileReviewers))
+			if r := findReviewer(ghc, log, useStatusAvailability, &busyReviewers, &fileReviewers); r != "" {
+				reviewers.Insert(2, r)
+			}
 		}
 	}
 	return reviewers.List(), requiredReviewers.List(), nil
 }
 
-// popRandom randomly selects an element of 'set' and pops it.
-func popRandom(set sets.String) string {
-	list := set.List()
-	sort.Strings(list)
-	sel := list[rand.Intn(len(list))]
-	set.Delete(sel)
-	return sel
-}
-
-func getReviewersOld(log *logrus.Entry, oc ownersClient, author string, changes []github.PullRequestChange, reviewerCount int) []string {
-	potentialReviewers, weightSum := getPotentialReviewers(oc, author, changes, true)
-	reviewers := selectMultipleReviewers(log, potentialReviewers, weightSum, reviewerCount)
-	if len(reviewers) < reviewerCount {
-		// Didn't find enough leaf reviewers, need to include reviewers from parent OWNERS files.
-		potentialReviewers, weightSum := getPotentialReviewers(oc, author, changes, false)
-		for _, reviewer := range reviewers {
-			delete(potentialReviewers, reviewer)
-		}
-		reviewers = append(reviewers, selectMultipleReviewers(log, potentialReviewers, weightSum, reviewerCount-len(reviewers))...)
-		if missing := reviewerCount - len(reviewers); missing > 0 {
-			log.Errorf("Not enough reviewers found in OWNERS files for files touched by this PR. %d/%d reviewers found.", len(reviewers), reviewerCount)
-		}
-	}
-	return reviewers
-}
-
-// weightMap is a map of user to a weight for that user.
-type weightMap map[string]int64
-
-func getPotentialReviewers(owners ownersClient, author string, files []github.PullRequestChange, leafOnly bool) (weightMap, int64) {
-	potentialReviewers := weightMap{}
-	weightSum := int64(0)
-	var fileOwners sets.String
-	for _, file := range files {
-		fileWeight := int64(1)
-		if file.Changes != 0 {
-			fileWeight = int64(file.Changes)
-		}
-		// Judge file size on a log scale-- effectively this
-		// makes three buckets, we shouldn't have many 10k+
-		// line changes.
-		fileWeight = int64(math.Log10(float64(fileWeight))) + 1
-		if leafOnly {
-			fileOwners = owners.LeafReviewers(file.Filename)
-		} else {
-			fileOwners = owners.Reviewers(file.Filename)
-		}
-
-		for _, owner := range fileOwners.List() {
-			if owner == author {
-				continue
-			}
-			potentialReviewers[owner] = potentialReviewers[owner] + fileWeight
-			weightSum += fileWeight
-		}
-	}
-	return potentialReviewers, weightSum
-}
-
-func selectMultipleReviewers(log *logrus.Entry, potentialReviewers weightMap, weightSum int64, count int) []string {
-	for name, weight := range potentialReviewers {
-		log.Debugf("Reviewer %s had chance %02.2f%%", name, chance(weight, weightSum))
+// findReviewer finds a reviewer from a set, potentially using status
+// availability.
+func findReviewer(ghc githubClient, log *logrus.Entry, useStatusAvailability bool, busyReviewers *sets.String, targetSet *layeredsets.String) string {
+	// if we don't care about status availability, just pop a target from the set
+	if !useStatusAvailability {
+		return targetSet.PopRandom()
 	}
 
-	// Make a copy of the map
-	pOwners := weightMap{}
-	for k, v := range potentialReviewers {
-		pOwners[k] = v
-	}
-
-	owners := []string{}
-
-	for i := 0; i < count; i++ {
-		if len(pOwners) == 0 || weightSum == 0 {
+	// if we do care, start looping through the candidates
+	for {
+		if targetSet.Len() == 0 {
+			// if there are no candidates left, then break
 			break
 		}
-		selection := rand.Int63n(weightSum)
-		owner := ""
-		for o, w := range pOwners {
-			owner = o
-			selection -= w
-			if selection <= 0 {
-				break
-			}
+		candidate := targetSet.PopRandom()
+		if busyReviewers.Has(candidate) {
+			// we've already verified this reviewer is busy
+			continue
 		}
-
-		owners = append(owners, owner)
-		weightSum -= pOwners[owner]
-
-		// Remove this person from the map.
-		delete(pOwners, owner)
+		busy, err := isUserBusy(ghc, candidate)
+		if err != nil {
+			log.Errorf("error checking user availability: %v", err)
+		}
+		if !busy {
+			return candidate
+		}
+		// if we haven't returned the candidate, then they must be busy.
+		busyReviewers.Insert(candidate)
 	}
-	return owners
+	return ""
 }
 
-func chance(val, total int64) float64 {
-	return 100.0 * float64(val) / float64(total)
+type githubAvailabilityQuery struct {
+	User struct {
+		Login  githubql.String
+		Status struct {
+			IndicatesLimitedAvailability githubql.Boolean
+		}
+	} `graphql:"user(login: $user)"`
+}
+
+func isUserBusy(ghc githubClient, user string) (bool, error) {
+	var query githubAvailabilityQuery
+	vars := map[string]interface{}{
+		"user": githubql.String(user),
+	}
+	ctx := context.Background()
+	err := ghc.Query(ctx, &query, vars)
+	return bool(query.User.Status.IndicatesLimitedAvailability), err
 }

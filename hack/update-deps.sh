@@ -13,37 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
-# Run dep ensure and generate bazel rules.
-#
-# Usage:
-#   update-deps.sh <ARGS>
-#
-# The args are sent to dep ensure -v <ARGS>
-
-set -o nounset
 set -o errexit
+set -o nounset
 set -o pipefail
+
+if ! command -v bazel &>/dev/null; then
+  echo "Install bazel at https://bazel.build" >&2
+  exit 1
+fi
+
+bazel=$(command -v bazelisk || command -v bazel)
 set -o xtrace
-
-TESTINFRA_ROOT=$(git rev-parse --show-toplevel)
-cd "${TESTINFRA_ROOT}"
-
-trap 'echo "FAILED" >&2' ERR
-# dep itself has a problematic testdata directory with infinite symlinks which
-# makes bazel sad: https://github.com/golang/dep/pull/1412
-# dep should probably be removing it, but it doesn't:
-# https://github.com/golang/dep/issues/1580
-rm -rf vendor/github.com/golang/dep/internal/fs/testdata
-# go-bindata does too, and is not maintained ...
-rm -rf vendor/github.com/jteeuwen/go-bindata/testdata
-# docker has a contrib dir with nothing we use in it, dep will retain the licenses
-# which includes some GPL, so we manually prune this. 
-# See https://github.com/kubernetes/steering/issues/57
-rm -rf vendor/github.com/docker/docker/contrib
-bazel run //:dep -- ensure -v "$@"
-rm -rf vendor/github.com/golang/dep/internal/fs/testdata
-rm -rf vendor/github.com/jteeuwen/go-bindata/testdata
-rm -rf vendor/github.com/docker/docker/contrib
-hack/update-bazel.sh
-echo SUCCESS
+"$bazel" run @io_k8s_repo_infra//hack:update-deps -- "$@"

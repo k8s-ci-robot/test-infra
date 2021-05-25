@@ -1,4 +1,11 @@
-approvers:
+# See the OWNERS docs at https://go.k8s.io/owners
+
+reviewers:
+- cjwagner
 - stevekuznetsov
+approvers:
+- cjwagner
+- stevekuznetsov
+
 labels:
  - area/prow/pod-utilities

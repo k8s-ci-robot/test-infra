@@ -3,7 +3,7 @@
     <link rel="stylesheet" href="/static/labels.css">
     <link rel="stylesheet" href="/static/dialog-polyfill.css">
     <script type="text/javascript" src="/static/pr_bundle.min.js"></script>
-    <script type="text/javascript" src="data.js?var=allBuilds"></script>
+    <script type="text/javascript" src="prowjobs.js?var=allBuilds&omit=annotations,labels,decoration_config,pod_spec"></script>
     <script type="text/javascript" src="tide.js?var=tideData"></script>
 {{end}}
 {{define "content"}}
@@ -13,9 +13,9 @@
 {{end}}
 {{define "extra content"}}
 <dialog id="search-dialog" class="pr-status-dialog mdl-dialog">
-  <h4 class="mdl-dialog__title">Github search query</h4>
+  <h4 class="mdl-dialog__title">GitHub search query</h4>
   <div class="mdl-dialog__content">
-    <p>You can query for <strong>pull requests</strong> using Github search syntax.</p>
+    <p>You can query for <strong>pull requests</strong> using GitHub search syntax.</p>
     <p>Notice:</p>
     <ol>
       <li>
@@ -44,6 +44,10 @@
 <dialog id="query-dialog" class="pr-status-dialog mdl-dialog">
   <h4 class="mdl-dialog__title">Query Details</h4>
   <div class="mdl-dialog__content">
+    <div id="query-detail-author" class="hidden">
+      <p class="detail-title">Author</p>
+      <p class="detail-data"></p>
+    </div>
     <div id="query-detail-milestone" class="hidden">
       <p class="detail-title">Milestone</p>
       <p class="detail-data"></p>
@@ -79,4 +83,4 @@
 </dialog>
 {{end}}
 
-{{template "page" (settings mobileFriendly "pr" .)}}
+{{template "page" (settings mobileFriendly lightMode "pr" .)}}

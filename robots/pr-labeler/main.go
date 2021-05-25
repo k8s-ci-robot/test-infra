@@ -26,7 +26,7 @@ import (
 	"net/url"
 
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/test-infra/prow/config"
+	"k8s.io/test-infra/prow/config/secret"
 	"k8s.io/test-infra/prow/flagutil"
 	"k8s.io/test-infra/prow/github"
 )
@@ -47,6 +47,7 @@ type client interface {
 type options struct {
 	confirm            bool
 	endpoint           flagutil.Strings
+	graphqlEndpoint    string
 	org                string
 	repo               string
 	tokenPath          string
@@ -55,8 +56,9 @@ type options struct {
 
 func flagOptions() options {
 	o := options{
-		endpoint: flagutil.NewStrings("https://api.github.com"),
+		endpoint: flagutil.NewStrings(github.DefaultAPIEndpoint),
 	}
+	flag.StringVar(&o.graphqlEndpoint, "graphql-endpoint", github.DefaultGraphQLEndpoint, "github graphql endpoint")
 	flag.BoolVar(&o.confirm, "confirm", false, "Mutate github if set")
 	flag.StringVar(&o.org, "org", "", "github org")
 	flag.StringVar(&o.repo, "repo", "", "github repo")
@@ -80,7 +82,7 @@ func main() {
 		log.Fatal("empty --token-path")
 	}
 
-	secretAgent := &config.SecretAgent{}
+	secretAgent := &secret.Agent{}
 	if err := secretAgent.Start([]string{o.tokenPath}); err != nil {
 		log.Fatalf("Error starting secrets agent: %v", err)
 	}
@@ -93,11 +95,16 @@ func main() {
 		}
 	}
 
+	_, err = url.Parse(o.graphqlEndpoint)
+	if err != nil {
+		log.Fatalf("Invalid --graphql-endpoint URL %q: %v.", o.graphqlEndpoint, err)
+	}
+
 	var c client
 	if o.confirm {
-		c = github.NewClient(secretAgent.GetTokenGenerator(o.tokenPath), o.endpoint.Strings()...)
+		c = github.NewClient(secretAgent.GetTokenGenerator(o.tokenPath), secretAgent.Censor, o.graphqlEndpoint, o.endpoint.Strings()...)
 	} else {
-		c = github.NewDryRunClient(secretAgent.GetTokenGenerator(o.tokenPath), o.endpoint.Strings()...)
+		c = github.NewDryRunClient(secretAgent.GetTokenGenerator(o.tokenPath), secretAgent.Censor, o.graphqlEndpoint, o.endpoint.Strings()...)
 	}
 
 	// get all open PRs

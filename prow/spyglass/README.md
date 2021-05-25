@@ -1,169 +1,114 @@
-[![GoDoc Widget]][GoDoc]
-
 # Spyglass
-A spyglass is an lensed monocular maritime instrument used to see things that may have been
-difficult to see otherwise.
 
-Spyglass is a pluggable artifact viewer framework for [Prow](..) and a crude
-metaphor for the real object. It collects artifacts (usually files in a storage
-bucket) from various sources and distributes them to registered viewers, which
+Spyglass is a pluggable artifact viewer framework for [Prow](..). It collects artifacts
+(usually files in a storage bucket) from various sources and distributes them to registered viewers, which
 are responsible for consuming them and rendering a view.
 
 A typical Spyglass page might look something like this:
-![I'm not a graphic designer I just make the backend](spyglass-example.png)
+![](spyglass-example.png)
 
-A general Spyglass query will proceed as follows:
-- User provides a job source in the query (usually a job name and build ID).
-- Spyglass finds all artifact names associated with the given job source.
-- Spyglass builds a cache of which artifacts match which lenses via
-  configured regular expressions.
-- Lenses with matching artifacts are pre-rendered in order of descending
-  priority.
-- Spyglass then sends render requests to each registered lens with its
-  matching artifacts.
-- Each lens performs any necessary operations on the artifacts and produces
-  a blob of HTML.
-- Views (HTML) are inserted asynchronously as viewers return.
+If you want to know how to write a Spyglass lens, check [the lens-writing guide](./write-a-lens.md).
+If you're interested in how Spyglass works, check [the architecture summary](./architecture.md).
 
+## Configuration
 
-## Lenses
-A lens is an set of functions that consume a list of artifacts and produces some
-HTML.
+Using Spyglass on your Prow instance requires you to first enable Spyglass in `deck`, and then
+configure Spyglass to actually do something.
 
-Lens names are unique, and must much the package name for the lens.
+### Enabling Spyglass
 
+To enable spyglass, just pass the `--spyglass` flag to your `deck` instance. Once spyglass is enabled,
+it will expose itself under `/view/` on your `deck` instance.
 
-### Built-in Viewers
-Spyglass comes with some built-in viewers for commonly produced artifacts.
+In order to make Spyglass useful, you may want to set your job URLs to point at it. You can do so by
+setting `plank.job_url_prefix_config['*']` to `https://your.deck/view/`, and possibly `plank.job_url_template`
+to reference something similar depending on your setup.
 
-- Prow Metadata  
-  ```
-  Name: metadata
-  Title: Metadata
-  Match: finished.json|started.json
-  Priority: 0
-  ```
-- JUnit  
-  ```
-  Name: junit
-  Title: JUnit
-  Matches: artifacts/junit.*\.xml
-  Priority: 5
-  ```
-- Logs  
-  ```
-  Name: buildlog
-  Title: Build Log
-  Matches: build-log.txt|pod-log
-  Priority: 10
-  ```
+If you are not using the images we provide, you may also need to provide `--spyglass-files-location`,
+pointing at the on-disk location of the `lenses` folder in this directory.
 
-### Building your own viewer
-Building a viewer consists of three main steps.
+### Configuring Spyglass
 
-#### Write Boilerplate
-First, create a package `lensnamehere` under `prow/spyglass/lenses` and
-import the `lenses` package.
+Spyglass configuration is contained in the `spyglass` subsection of the `deck` section of Prow's
+primary configuration.
 
-#### Implement
-Next, implement the necessary functions for a viewer. More specifically,
-implement the following interface (defined in lenses.go):
-```go
-type Lens interface {
-    // Name returns the name of your lens (which must match the name of the directory it lives in)
-	Name() string
-	// Title returns a human-readable title for your lens.
-	Title() string
-	// Priority returns a number that is used to determine the ordering of your lens (lower is more important)
-	Priority() int
-	// Header is used to inject content into the lens's <head>. It will only ever be called once per load.
-	Header(artifacts []Artifact, resourceDir string) string
-	// Body is used to generate the contents of the lens's <body>. It will initially be called with empty data, but
-	// the lens front-end code may choose to re-render itself with custom data.
-	Body(artifacts []Artifact, resourceDir string, data string) string
-	// Callback is used for the viewer to exchange arbitrary data with the frontend. It is called with lens-specified
-	// data, and returns data to be passed to the lens. JSON encoding is recommended in both directions.
-	Callback(artifacts []Artifact, resourceDir string, data string) string
-}
-```
+The `spyglass` block has the following properties:
 
-In the `init` method, call `lenses.RegisterLens()` with an instance of your implementation of the interface.
-Spyglass should now be aware of your lens.
+| Name | Required | Example | Description |
+|---|---|---|---|
+| `size_limit` | Yes | `100000000` | The maximum size of an artifact to download, in bytes. Larger values will be omitted or truncated. |
+| `gcs_browser_prefix` | No | `https://gcsweb.k8s.io/gcs/` | If you have a GCS browser available, the bucket and path to the artifact directory will be appended to `gcs_browser_prefix` and linked from Spyglass pages. If left unset, no artifacts link will be visible. The provided URL should have a trailing slash |
+| `testgrid_config` | No | `gs://k8s-testgrid/config` | If you have a TestGrid instance available, `testgrid_config` should point to the TestGrid config proto on GCS. If omitted, no TestGrid link will be visible.
+| `testgrid_root` | No | `https://testgrid.k8s.io/` | If you have a TestGrid instance available, `testgrid_root` should point to the root of the TestGrid web interface. If omitted, no TestGrid link will be visible.
+| `announcement` | No | `"Remember: friendship is magic!"` | If announcement is set, the string will appear at the top of the page. `announcement` is parsed as a Go template. The only value provided is `.ArtifactPath`, which is of the form `gcs-bucket/path/to/job/root/`.
+| `lenses` | Yes | (see below) | `lenses` configures the lenses you want, when they should be visible, what artifacts they should receive, and
 
-Additionally, some front-end TypeScript code can be provided. Configure your BUILD.bazel to build it, then emit a
-<script> tag with a relative reference to it in your `Header()` implementation. See `buildlog/BUILD.bazel` for an
-example.
+#### Configuring Lenses
 
-In your typescript code, a global `spyglass` object will be available, providing the following interface:
+Lenses are the Spyglass components that actually display information. The `lenses` block under the
+`spyglass` block is a list of configuration for each lens. Each lens entry has the following
+properties:
 
-```ts
-export interface Spyglass {
-  /**
-   * Replaces the lens display with a new server-rendered page.
-   * The returned promise will be resolved once the page has been updated.
-   */
-  updatePage(data: string): Promise<void>;
-  /**
-   * Requests that the server re-render the lens with the provided data, and
-   * returns a promise that will resolve with that HTML as a string.
-   *
-   * This is equivalent to updatePage(), except that the displayed content is
-   * not automatically changed.
-   */
-  requestPage(data: string): Promise<string>;
-  /**
-   * Sends a request to the server-side lens backend with the provided data, and
-   * returns a promise that will resolve with the response as a string.
-   */
-  request(data: string): Promise<string>;
-  /**
-   * Inform Spyglass that the lens content has updated. This should be called whenever
-   * the visible content changes, so Spyglass can ensure that all content is visible.
-   */
-  contentUpdated(): void;
-}
-```
+| Name | Required | Example | Description |
+|---|---|---|---|
+| `required_files` | Yes | `- build-log\.txt` | A list of regexes matching artifact names that _must_ be present for a lens to appear. The list entries are ANDed together - that is, something much match every entry. OR can be simulated by using a pipe in a single regex entry.
+| `optional_files` | No | `- something\.txt` | A list of regexes matching artifact names that will be provided to a lens if present, but are not necessary for it to appear (for that, use `required_files`). Since each entry in the list is optional, these are effectively ORed together.
+| `lens.name` | Yes | `buildlog` | The name of the lens you want to render these files. Must be a known lens name.
+| `lens.config` | No | | Lens-specific configuration. What can be included here, if anything, depends on the lens in question.
 
-#### Add to config
-Finally, decide which artifacts you want your viewer to consume and create a regex that
-matches these artifacts. The JUnit viewer, for example, consumes all
-artifacts that match `artifacts/junit.*\.xml`.
+The following lenses are available:
 
-Add a line in `prow` config under the `viewers` section of `spyglass` of the following form:
-```yaml
-"myartifactregexp": ["my-view-name"]
-```
+- `metadata`: parses the metadata files generated by [podutils](https://github.com/kubernetes/test-infra/blob/master/prow/pod-utilities.md)
+  and displays their content. It has no configuration.
+- `junit`: parses junit files and displays their content. It has no configuration
+- `buildlog`: displays the build log (or any other log file), highlighting interesting parts and
+  hiding the rest behind expandable folders. You can configure what it considers "interesting" by
+  providing `highlight_regexes`, a list of regexes to highlight. If not specified, it uses [defaults
+  optimised for highlighting Kubernetes test results](https://github.com/kubernetes/test-infra/blob/370da51e0f051504be2e97305e8536ab06b3f0df/prow/spyglass/lenses/buildlog/lens.go#L76). The optional `hide_raw_log` boolean field can be used to omit the link to the raw `build-log.txt` source.
+- `podinfo`: displays info about ProwJob pods including the events and details about containers and volumes. The [`gcsk8sreporter` Crier reporter](https://github.com/kubernetes/test-infra/tree/b6180c95b3383919711cfc97436a2d082281d284/prow/crier/reporters/gcs/kubernetes) must be enabled to upload the required `podinfo.json` file.
+- `coverage`: displays go coverage content
+- `restcoverage`: displays REST API statistics
 
-The next time a job is viewed that contains artifacts matched by your regexp,
-your view should display.
+#### Example Configuration
 
-See the [GoDoc](https://godoc.org/k8s.io/test-infra/prow/spyglass/lenses) for
-more details and examples.
-
-## Config
-
-Spyglass is currently disabled by default. To enable it, add the `--spyglass` arg to your
-[deck deployment](https://github.com/kubernetes/test-infra/blob/e9e544733854d54403aa1dfd84ca009fd9b942f0/prow/cluster/starter.yaml#L236).
-
-Spyglass config takes the following form:
 ```yaml
 deck:
   spyglass:
-    size_limit: 500e6
-    viewers:
-      "started.json|finished.json": ["metadata-viewer"]
-      "build-log.txt": ["build-log-viewer"]
-      "artifacts/junit.*\\.xml": ["junit-viewer"] # Remember to escape your '\' in yaml strings!
+    size_limit: 100000000  # 100 MB
+    gcs_browser_prefix: https://gcsweb.k8s.io/gcs/
+    testgrid_config: gs://k8s-testgrid/config
+    testgrid_root: https://testgrid.k8s.io/
+    announcement: "The old job viewer has been deprecated."
+    lenses:
+    - lens:
+        name: metadata
+      required_files:
+      - ^(?:started|finished)\.json$
+      optional_files:
+      - ^(?:podinfo|prowjob)\.json$
+    - lens:
+        name: buildlog
+        config:
+          highlight_regexes:
+          - timed out
+          - 'ERROR:'
+          - (FAIL|Failure \[)\b
+          - panic\b
+          - ^E\d{4} \d\d:\d\d:\d\d\.\d\d\d]
+      required_files:
+      - ^build-log\.txt$
+    - lens:
+        name: junit
+      required_files:
+      - ^artifacts/junit.*\.xml$
+    - lens:
+        name: podinfo
+      required_files:
+        - ^podinfo\.json$
 ```
 
-More formally, it is a single `spyglass` object under the top-level `deck`
-object that may contain fields `viewers` and `size_limit`. `viewers` is a map of `string->[]string`
-where the key must be a [valid golang regular
-expression](https://github.com/google/re2/wiki/Syntax) and the value is a list
-of viewer names that consume the artifacts matched by the corresponding regular
-expression. `size_limit` is the maximum artifact size `spyglass` will try to
-read in entirety before failing.
+### Accessing custom storage buckets
 
-
-[GoDoc]: https://godoc.org/k8s.io/test-infra/prow/spyglass
-[GoDoc Widget]: https://godoc.org/k8s.io/kubernetes?status.svg
+By default, spyglass has access to all storage buckets defined globally
+(`plank.default_decoration_configs[...].gcs_configuration`) or on individual jobs (`<path-to-job>.gcs_configuration.bucket`).
+In order to access additional/custom storage buckets, those buckets must be listed in `deck.additional_storage_buckets`.

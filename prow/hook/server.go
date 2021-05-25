@@ -31,6 +31,8 @@ import (
 
 	"k8s.io/test-infra/prow/config"
 	"k8s.io/test-infra/prow/github"
+	"k8s.io/test-infra/prow/githubeventserver"
+	_ "k8s.io/test-infra/prow/hook/plugin-imports"
 	"k8s.io/test-infra/prow/plugins"
 )
 
@@ -41,7 +43,8 @@ type Server struct {
 	Plugins        *plugins.ConfigAgent
 	ConfigAgent    *config.Agent
 	TokenGenerator func() []byte
-	Metrics        *Metrics
+	Metrics        *githubeventserver.Metrics
+	RepoEnabled    func(org, repo string) bool
 
 	// c is an http client used for dispatching events
 	// to external plugin services.
@@ -52,8 +55,8 @@ type Server struct {
 
 // ServeHTTP validates an incoming webhook and puts it into the event channel.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	eventType, eventGUID, payload, ok, resp := github.ValidateWebhook(w, r, s.TokenGenerator())
-	if counter, err := s.Metrics.WebhookCounter.GetMetricWithLabelValues(strconv.Itoa(resp)); err != nil {
+	eventType, eventGUID, payload, ok, resp := github.ValidateWebhook(w, r, s.TokenGenerator)
+	if counter, err := s.Metrics.ResponseCounter.GetMetricWithLabelValues(strconv.Itoa(resp)); err != nil {
 		logrus.WithFields(logrus.Fields{
 			"status-code": resp,
 		}).WithError(err).Error("Failed to get metric for reporting webhook status code")
@@ -74,7 +77,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) demuxEvent(eventType, eventGUID string, payload []byte, h http.Header) error {
 	l := logrus.WithFields(
 		logrus.Fields{
-			"event-type":     eventType,
+			eventTypeField:   eventType,
 			github.EventGUID: eventGUID,
 		},
 	)
@@ -93,8 +96,10 @@ func (s *Server) demuxEvent(eventType, eventGUID string, payload []byte, h http.
 		}
 		i.GUID = eventGUID
 		srcRepo = i.Repo.FullName
-		s.wg.Add(1)
-		go s.handleIssueEvent(l, i)
+		if s.RepoEnabled(i.Repo.Owner.Login, i.Repo.Name) {
+			s.wg.Add(1)
+			go s.handleIssueEvent(l, i)
+		}
 	case "issue_comment":
 		var ic github.IssueCommentEvent
 		if err := json.Unmarshal(payload, &ic); err != nil {
@@ -102,8 +107,10 @@ func (s *Server) demuxEvent(eventType, eventGUID string, payload []byte, h http.
 		}
 		ic.GUID = eventGUID
 		srcRepo = ic.Repo.FullName
-		s.wg.Add(1)
-		go s.handleIssueCommentEvent(l, ic)
+		if s.RepoEnabled(ic.Repo.Owner.Login, ic.Repo.Name) {
+			s.wg.Add(1)
+			go s.handleIssueCommentEvent(l, ic)
+		}
 	case "pull_request":
 		var pr github.PullRequestEvent
 		if err := json.Unmarshal(payload, &pr); err != nil {
@@ -111,8 +118,10 @@ func (s *Server) demuxEvent(eventType, eventGUID string, payload []byte, h http.
 		}
 		pr.GUID = eventGUID
 		srcRepo = pr.Repo.FullName
-		s.wg.Add(1)
-		go s.handlePullRequestEvent(l, pr)
+		if s.RepoEnabled(pr.Repo.Owner.Login, pr.Repo.Name) {
+			s.wg.Add(1)
+			go s.handlePullRequestEvent(l, pr)
+		}
 	case "pull_request_review":
 		var re github.ReviewEvent
 		if err := json.Unmarshal(payload, &re); err != nil {
@@ -120,8 +129,10 @@ func (s *Server) demuxEvent(eventType, eventGUID string, payload []byte, h http.
 		}
 		re.GUID = eventGUID
 		srcRepo = re.Repo.FullName
-		s.wg.Add(1)
-		go s.handleReviewEvent(l, re)
+		if s.RepoEnabled(re.Repo.Owner.Login, re.Repo.Name) {
+			s.wg.Add(1)
+			go s.handleReviewEvent(l, re)
+		}
 	case "pull_request_review_comment":
 		var rce github.ReviewCommentEvent
 		if err := json.Unmarshal(payload, &rce); err != nil {
@@ -129,8 +140,10 @@ func (s *Server) demuxEvent(eventType, eventGUID string, payload []byte, h http.
 		}
 		rce.GUID = eventGUID
 		srcRepo = rce.Repo.FullName
-		s.wg.Add(1)
-		go s.handleReviewCommentEvent(l, rce)
+		if s.RepoEnabled(rce.Repo.Owner.Login, rce.Repo.Name) {
+			s.wg.Add(1)
+			go s.handleReviewCommentEvent(l, rce)
+		}
 	case "push":
 		var pe github.PushEvent
 		if err := json.Unmarshal(payload, &pe); err != nil {
@@ -138,8 +151,10 @@ func (s *Server) demuxEvent(eventType, eventGUID string, payload []byte, h http.
 		}
 		pe.GUID = eventGUID
 		srcRepo = pe.Repo.FullName
-		s.wg.Add(1)
-		go s.handlePushEvent(l, pe)
+		if s.RepoEnabled(pe.Repo.Owner.Login, pe.Repo.Name) {
+			s.wg.Add(1)
+			go s.handlePushEvent(l, pe)
+		}
 	case "status":
 		var se github.StatusEvent
 		if err := json.Unmarshal(payload, &se); err != nil {
@@ -147,8 +162,12 @@ func (s *Server) demuxEvent(eventType, eventGUID string, payload []byte, h http.
 		}
 		se.GUID = eventGUID
 		srcRepo = se.Repo.FullName
-		s.wg.Add(1)
-		go s.handleStatusEvent(l, se)
+		if s.RepoEnabled(se.Repo.Owner.Login, se.Repo.Name) {
+			s.wg.Add(1)
+			go s.handleStatusEvent(l, se)
+		}
+	default:
+		l.Debug("Ignoring unhandled event type. (Might still be handled by external plugins.)")
 	}
 	// Demux events only to external plugins that require this event.
 	if external := s.needDemux(eventType, srcRepo); len(external) > 0 {
@@ -159,22 +178,21 @@ func (s *Server) demuxEvent(eventType, eventGUID string, payload []byte, h http.
 
 // needDemux returns whether there are any external plugins that need to
 // get the present event.
-func (s *Server) needDemux(eventType, srcRepo string) []plugins.ExternalPlugin {
+func (s *Server) needDemux(eventType, orgRepo string) []plugins.ExternalPlugin {
 	var matching []plugins.ExternalPlugin
-	srcOrg := strings.Split(srcRepo, "/")[0]
+	split := strings.Split(orgRepo, "/")
+	srcOrg := split[0]
+	var srcRepo string
+	if len(split) > 1 {
+		srcRepo = split[1]
+	}
+	if !s.RepoEnabled(srcOrg, srcRepo) {
+		return nil
+	}
 
 	for repo, plugins := range s.Plugins.Config().ExternalPlugins {
 		// Make sure the repositories match
-		var matchesRepo bool
-		if repo == srcRepo {
-			matchesRepo = true
-		}
-		// If repo is an org, we need to compare orgs.
-		if !matchesRepo && !strings.Contains(repo, "/") && repo == srcOrg {
-			matchesRepo = true
-		}
-		// No need to continue if the repos don't match.
-		if !matchesRepo {
+		if repo != orgRepo && repo != srcOrg {
 			continue
 		}
 
@@ -235,10 +253,10 @@ func (s *Server) dispatch(endpoint string, payload []byte, h http.Header) error 
 	return nil
 }
 
-// Implements a graceful shutdown protool. Handles all requests sent before receiving shutdown signal.
+// GracefulShutdown implements a graceful shutdown protocol. It handles all requests sent before
+// receiving the shutdown signal.
 func (s *Server) GracefulShutdown() {
 	s.wg.Wait() // Handle remaining requests
-	return
 }
 
 func (s *Server) do(req *http.Request) (*http.Response, error) {

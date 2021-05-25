@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"os/exec"
@@ -25,62 +26,58 @@ import (
 )
 
 type bashDeployer struct {
-	clusterIPRange string
+	clusterIPRange          string
+	gcpProject              string
+	gcpZone                 string
+	gcpSSHProxyInstanceName string
+	provider                string
+	nodeLoggingEnabled      bool
 }
 
 var _ deployer = &bashDeployer{}
 
-func newBash(clusterIPRange *string) *bashDeployer {
+var (
+	bashNodeLogging = flag.Bool("bash-node-logging", false, "(bash only) enable node logging to gcp")
+)
+
+func newBash(clusterIPRange *string, gcpProject, gcpZone, gcpSSHProxyInstanceName, provider string) *bashDeployer {
 	if *clusterIPRange == "" {
 		if numNodes, err := strconv.Atoi(os.Getenv("NUM_NODES")); err == nil {
 			*clusterIPRange = getClusterIPRange(numNodes)
 		}
 	}
-	b := &bashDeployer{*clusterIPRange}
+	b := &bashDeployer{*clusterIPRange, gcpProject, gcpZone, gcpSSHProxyInstanceName, provider, *bashNodeLogging}
 	return b
 }
 
 func (b *bashDeployer) Up() error {
-	// TODO(shashidharatd): Remove below logic of choosing the scripts to run from federation
-	// repo once the k8s deployment in federation jobs moves to kubernetes-anywhere
-	var script string
-	if useFederationRepo() {
-		script = "../federation/hack/e2e-internal/e2e-up.sh"
-	} else {
-		script = "./hack/e2e-internal/e2e-up.sh"
-	}
+	script := "./hack/e2e-internal/e2e-up.sh"
 	cmd := exec.Command(script)
 	cmd.Env = os.Environ()
 	cmd.Env = append(cmd.Env, fmt.Sprintf("CLUSTER_IP_RANGE=%s", b.clusterIPRange))
+	cmd.Env = append(cmd.Env, fmt.Sprintf("KUBE_ENABLE_NODE_LOGGING=%t", b.nodeLoggingEnabled))
 	return control.FinishRunning(cmd)
 }
 
 func (b *bashDeployer) IsUp() error {
-	var cmd string
-	if useFederationRepo() {
-		cmd = "../federation/hack/e2e-internal/e2e-status.sh"
-	} else {
-		cmd = "./hack/e2e-internal/e2e-status.sh"
-	}
-	return control.FinishRunning(exec.Command(cmd))
+	return control.FinishRunning(exec.Command("./hack/e2e-internal/e2e-status.sh"))
 }
 
 func (b *bashDeployer) DumpClusterLogs(localPath, gcsPath string) error {
-	return defaultDumpClusterLogs(localPath, gcsPath)
+	return defaultDumpClusterLogs(localPath, gcsPath, b.provider)
 }
 
 func (b *bashDeployer) TestSetup() error {
+	if b.provider == "gce" && b.gcpSSHProxyInstanceName != "" {
+		if err := setKubeShhBastionEnv(b.gcpProject, b.gcpZone, b.gcpSSHProxyInstanceName); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
 func (b *bashDeployer) Down() error {
-	var cmd string
-	if useFederationRepo() {
-		cmd = "../federation/hack/e2e-internal/e2e-down.sh"
-	} else {
-		cmd = "./hack/e2e-internal/e2e-down.sh"
-	}
-	return control.FinishRunning(exec.Command(cmd))
+	return control.FinishRunning(exec.Command("./hack/e2e-internal/e2e-down.sh"))
 }
 
 func (b *bashDeployer) GetClusterCreated(gcpProject string) (time.Time, error) {
@@ -102,7 +99,7 @@ func (b *bashDeployer) GetClusterCreated(gcpProject string) (time.Time, error) {
 	return created, nil
 }
 
-func (_ *bashDeployer) KubectlCommand() (*exec.Cmd, error) { return nil, nil }
+func (b *bashDeployer) KubectlCommand() (*exec.Cmd, error) { return nil, nil }
 
 // Calculates the cluster IP range based on the no. of nodes in the cluster.
 // Note: This mimics the function get-cluster-ip-range used by kube-up script.

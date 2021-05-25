@@ -25,14 +25,14 @@ import re
 import subprocess
 import sys
 
-
+# This is deprecated from 1.14 onwards.
 VERSION_TAG = {
-    '1.10': '1.10-v20180221-3655e24ae',
-    '1.11': '1.11-v20180504-30872f7f6',
-    '1.12': '1.12-v20180918-e0a9aa399',
-    '1.13': '1.13-v20181105-ceed87206',
+    '1.11': '1.11-v20190318-2ac98e338',
+    '1.12': '1.12-v20190318-2ac98e338',
+    '1.13': '1.13-v20190817-cc05229',
+    '1.14': '1.14-v20190817-cc05229',
     # this is master, feature branches...
-    'default': '1.13-v20181105-ceed87206'
+    'default': '1.14-v20190817-cc05229',
 }
 
 
@@ -86,11 +86,14 @@ def branch_to_tag(branch):
     return VERSION_TAG[key]
 
 
-def main(branch, script, force, on_prow):
+def main(branch, script, force, on_prow, exclude_typecheck, exclude_godep, exclude_files_remake):
     """Test branch using script, optionally forcing verify checks."""
     tag = branch_to_tag(branch)
 
     force = 'y' if force else 'n'
+    exclude_typecheck = 'y' if exclude_typecheck else 'n'
+    exclude_godep = 'y' if exclude_godep else 'n'
+    exclude_files_remake = 'y' if exclude_files_remake else 'n'
     artifacts = '%s/_artifacts' % os.environ['WORKSPACE']
     k8s = os.getcwd()
     if not os.path.basename(k8s) == 'kubernetes':
@@ -112,7 +115,7 @@ def main(branch, script, force, on_prow):
         os.makedirs(artifacts)
 
     if on_prow:
-        # TODO(bentheelder): on prow REPO_DIR should be /go/src/k8s.io/kubernetes
+        # TODO: on prow REPO_DIR should be /go/src/k8s.io/kubernetes
         # however these paths are brittle enough as is...
         git_cache = get_git_cache(k8s)
         cmd = [
@@ -128,6 +131,9 @@ def main(branch, script, force, on_prow):
             '-v', '%s:/workspace/artifacts' % artifacts,
             '-e', 'KUBE_FORCE_VERIFY_CHECKS=%s' % force,
             '-e', 'KUBE_VERIFY_GIT_BRANCH=%s' % branch,
+            '-e', 'EXCLUDE_TYPECHECK=%s' % exclude_typecheck,
+            '-e', 'EXCLUDE_FILES_REMAKE=%s' % exclude_files_remake,
+            '-e', 'EXCLUDE_GODEP=%s' % exclude_godep,
             '-e', 'REPO_DIR=%s' % k8s,  # hack/lib/swagger.sh depends on this
             '--tmpfs', '/tmp:exec,mode=1777',
             'gcr.io/k8s-testimages/kubekins-test:%s' % tag,
@@ -143,6 +149,9 @@ def main(branch, script, force, on_prow):
             '-v', '%s:/workspace/artifacts' % artifacts,
             '-e', 'KUBE_FORCE_VERIFY_CHECKS=%s' % force,
             '-e', 'KUBE_VERIFY_GIT_BRANCH=%s' % branch,
+            '-e', 'EXCLUDE_TYPECHECK=%s' % exclude_typecheck,
+            '-e', 'EXCLUDE_FILES_REMAKE=%s' % exclude_files_remake,
+            '-e', 'EXCLUDE_GODEP=%s' % exclude_godep,
             '-e', 'REPO_DIR=%s' % k8s,  # hack/lib/swagger.sh depends on this
             'gcr.io/k8s-testimages/kubekins-test:%s' % tag,
             'bash', '-c', 'cd kubernetes && %s' % script,
@@ -157,6 +166,12 @@ if __name__ == '__main__':
     PARSER.add_argument(
         '--force', action='store_true', help='Force all verify checks')
     PARSER.add_argument(
+        '--exclude-typecheck', action='store_true', help='Exclude typecheck from verify')
+    PARSER.add_argument(
+        '--exclude-godep', action='store_true', help='Exclude godep checks from verify')
+    PARSER.add_argument(
+        '--exclude-files-remake', action='store_true', help='Exclude files remake from verify')
+    PARSER.add_argument(
         '--script',
         default='./hack/jenkins/test-dockerized.sh',
         help='Script in kubernetes/kubernetes that runs checks')
@@ -164,4 +179,5 @@ if __name__ == '__main__':
         '--prow', action='store_true', help='Force Prow mode'
     )
     ARGS = PARSER.parse_args()
-    main(ARGS.branch, ARGS.script, ARGS.force, ARGS.prow)
+    main(ARGS.branch, ARGS.script, ARGS.force, ARGS.prow,
+         ARGS.exclude_typecheck, ARGS.exclude_godep, ARGS.exclude_files_remake)

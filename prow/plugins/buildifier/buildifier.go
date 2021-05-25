@@ -14,8 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// buildifier defines a Prow plugin that runs buildifier over modified BUILD,
-// WORKSPACE, and skylark (.bzl) files in pull requests.
+// Package buildifier defines a Prow plugin that runs buildifier over modified
+// BUILD, WORKSPACE, and skylark (.bzl) files in pull requests.
 package buildifier
 
 import (
@@ -24,32 +24,31 @@ import (
 	"io/ioutil"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/bazelbuild/buildtools/build"
 	"github.com/sirupsen/logrus"
 
+	"k8s.io/test-infra/prow/config"
 	"k8s.io/test-infra/prow/genfiles"
-	"k8s.io/test-infra/prow/git"
+	"k8s.io/test-infra/prow/git/v2"
 	"k8s.io/test-infra/prow/github"
 	"k8s.io/test-infra/prow/pluginhelp"
 	"k8s.io/test-infra/prow/plugins"
 )
 
 const (
-	pluginName  = "buildifier"
-	maxComments = 20
+	pluginName = "buildifier"
 )
 
 var buildifyRe = regexp.MustCompile(`(?mi)^/buildif(y|ier)\s*$`)
 
 func init() {
-	plugins.RegisterGenericCommentHandler(pluginName, handleGenericComment, nil)
+	plugins.RegisterGenericCommentHandler(pluginName, handleGenericComment, helpProvider)
 }
 
-func helpProvider(config *plugins.Configuration, enabledRepos []string) (*pluginhelp.PluginHelp, error) {
+func helpProvider(config *plugins.Configuration, _ []config.OrgRepo) (*pluginhelp.PluginHelp, error) {
 	// The Config field is omitted because this plugin is not configurable.
 	pluginHelp := &pluginhelp.PluginHelp{
 		Description: "The buildifier plugin runs buildifier on changes made to Bazel files in a PR. It then creates a new review on the pull request and leaves warnings at the appropriate lines of code.",
@@ -109,25 +108,12 @@ func modifiedBazelFiles(ghc githubClient, org, repo string, number int, sha stri
 	return modifiedFiles, nil
 }
 
-func uniqProblems(problems []string) []string {
-	sort.Strings(problems)
-	var uniq []string
-	last := ""
-	for _, s := range problems {
-		if s != last {
-			last = s
-			uniq = append(uniq, s)
-		}
-	}
-	return uniq
-}
-
 // problemsInFiles runs buildifier on the files. It returns a map from the file to
 // a list of problems with that file.
-func problemsInFiles(r *git.Repo, files map[string]string) (map[string][]string, error) {
-	problems := make(map[string][]string)
+func problemsInFiles(r git.RepoClient, files map[string]string) (map[string]bool, error) {
+	problems := map[string]bool{}
 	for f := range files {
-		src, err := ioutil.ReadFile(filepath.Join(r.Dir, f))
+		src, err := ioutil.ReadFile(filepath.Join(r.Directory(), f))
 		if err != nil {
 			return nil, err
 		}
@@ -137,19 +123,16 @@ func problemsInFiles(r *git.Repo, files map[string]string) (map[string][]string,
 		if err != nil {
 			return nil, fmt.Errorf("parsing as Bazel file %v", err)
 		}
-		beforeRewrite := build.Format(content)
-		var info build.RewriteInfo
-		build.Rewrite(content, &info)
+		beforeRewrite := build.FormatWithoutRewriting(content)
 		ndata := build.Format(content)
 		if !bytes.Equal(src, ndata) && !bytes.Equal(src, beforeRewrite) {
-			// TODO(mattmoor): This always seems to be empty?
-			problems[f] = uniqProblems(info.Log)
+			problems[f] = true
 		}
 	}
 	return problems, nil
 }
 
-func handle(ghc githubClient, gc *git.Client, log *logrus.Entry, e *github.GenericCommentEvent) error {
+func handle(ghc githubClient, gc git.ClientFactory, log *logrus.Entry, e *github.GenericCommentEvent) error {
 	// Only handle open PRs and new requests.
 	if e.IssueState != "open" || !e.IsPR || e.Action != github.GenericCommentActionCreated {
 		return nil
@@ -178,7 +161,7 @@ func handle(ghc githubClient, gc *git.Client, log *logrus.Entry, e *github.Gener
 
 	// Clone the repo, checkout the PR.
 	startClone := time.Now()
-	r, err := gc.Clone(e.Repo.FullName)
+	r, err := gc.ClientFor(org, repo)
 	if err != nil {
 		return err
 	}

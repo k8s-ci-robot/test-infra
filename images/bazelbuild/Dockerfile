@@ -13,9 +13,9 @@
 # limitations under the License.
 
 # Includes git, gcloud, and bazel.
-FROM ubuntu:16.04
-# TODO(bentheelder): consider replacing all maintainers with a test-infra-maintainers alias of some sort
-LABEL maintainer="bentheelder@google.com"
+ARG OLD_BAZEL_VERSION
+FROM launcher.gcr.io/google/bazel:${OLD_BAZEL_VERSION} as old
+FROM ubuntu:18.04
 
 # add env we can debug with the image name:tag
 ARG IMAGE_ARG
@@ -29,15 +29,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     file \
     git \
     openssh-client \
-    python \
+    python2.7 \
+    python3 \
     python-pip \
+    python3-pip \
     rpm \
     unzip \
     wget \
     zip \
     zlib1g-dev \
-    && apt-get clean \
-    && python -m pip install --upgrade pip setuptools wheel
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install setuptools wheel \
+    && pip3 install setuptools wheel
 
 RUN wget -q https://dl.google.com/dl/cloudsdk/channels/rapid/google-cloud-sdk.tar.gz && \
     tar xf google-cloud-sdk.tar.gz && \
@@ -55,6 +58,11 @@ RUN INSTALLER="bazel-${BAZEL_VERSION}-installer-linux-x86_64.sh"; \
     DOWNLOAD_URL="https://github.com/bazelbuild/bazel/releases/download/${BAZEL_VERSION}/${INSTALLER}"; \
     wget -q "${DOWNLOAD_URL}" && \
     chmod +x "${INSTALLER}" && "./${INSTALLER}" && rm "${INSTALLER}"
+
+ARG OLD_BAZEL_VERSION
+COPY --from=old \
+    /usr/local/lib/bazel/bin/bazel-real /usr/local/lib/bazel/bin/bazel-${OLD_BAZEL_VERSION}
+
 
 WORKDIR /workspace
 COPY runner /usr/local/bin/

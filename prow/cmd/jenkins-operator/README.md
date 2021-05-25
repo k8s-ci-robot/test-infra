@@ -1,13 +1,13 @@
 # Jenkins operator
 
 `jenkins-operator` is a controller that enables Prow to use Jenkins
-as a backend for running jobs. 
+as a backend for running jobs.
 
 ## Jenkins configuration
 
 A Jenkins master needs to be provided via `--jenkins-url` in order for
 the operator to make requests to. By default, `--dry-run` is set to `true`
-so the operator will not make any mutating requests to Jenkins, Github,
+so the operator will not make any mutating requests to Jenkins, GitHub,
 and Kubernetes, but you most probably want to set it to `false`.
 The Jenkins operator expects to read the Prow configuration by default
 in `/etc/config/config.yaml` which can be configured with `--config-path`.
@@ -18,7 +18,6 @@ The following stanza is config that can be optionally set in the Prow config fil
 jenkins_operators:
 - max_concurrency: 150
   max_goroutines: 20
-  allow_cancellations: true
   job_url_template: 'https://storage-for-logs/{{if eq .Spec.Type "presubmit"}}pr-logs/pull{{else if eq .Spec.Type "batch"}}pr-logs/pull{{else}}logs{{end}}{{if ne .Spec.Refs.Repo "origin"}}/{{.Spec.Refs.Org}}_{{.Spec.Refs.Repo}}{{end}}{{if eq .Spec.Type "presubmit"}}/{{with index .Spec.Refs.Pulls 0}}{{.Number}}{{end}}{{else if eq .Spec.Type "batch"}}/batch{{end}}/{{.Spec.Job}}/{{.Status.BuildID}}/'
   report_template: '[Full PR test history](https://pr-history/{{if ne .Spec.Refs.Repo "origin"}}{{.Spec.Refs.Org}}_{{.Spec.Refs.Repo}}/{{end}}{{with index .Spec.Refs.Pulls 0}}{{.Number}}{{end}}).'
 ```
@@ -28,13 +27,10 @@ run in parallel, otherwise the operator is not going to start new builds.
 Defaults to 0, which means no limit.
 * `max_goroutines` is the maximum number of goroutines that the operator
 will spin up to handle all Jenkins builds. Defaulted to 20.
-* `allow_cancellations` allows canceling Jenkins builds for presubmit
-jobs that have been superseded by jobs for newer commits. By default,
-this is set to `false`.
 * `job_url_template` is a Golang-templated URL that shows up in the Details
-button next to the Github job status context. A ProwJob is provided as input
+button next to the GitHub job status context. A ProwJob is provided as input
 to the template.
-* `report_template` is a Golang-templated message that shows up in Github in
+* `report_template` is a Golang-templated message that shows up in GitHub in
 case of a job failure. A ProwJob is provided as input to the template.
 
 ### Security
@@ -68,6 +64,10 @@ clicks the `Build log` button of a Jenkins job (`agent: jenkins`).
 `jenkins-operator` forwards the request to Jenkins and serves back
 the response.
 
+**NOTE:** Deck will display the `Build log` button on the main page when the agent is not `kubernetes`
+regardless the external agent log was configured on the server side. Deck has no way to know if the server
+side configuration is consistent when rendering jobs on the main page.
+
 ## Job configuration
 
 Below follows the Prow configuration for a Jenkins job:
@@ -87,6 +87,10 @@ What is interesting for us here is the `agent` field which needs to
 be set to `jenkins` in order for jobs to be dispatched to Jenkins and
 `name` which is the name of the job inside Jenkins.
 
+The following parameters must be added within each Jenkins job:
+* `BUILD_ID`
+* `PROW_JOB_ID`
+
 ## Sharding
 
 Sharding of Jenkins jobs is supported via Kubernetes labels and label
@@ -94,7 +98,7 @@ selectors. This enables Prow to work with multiple Jenkins masters.
 Three places need to be configured in order to use sharding:
 * `--label-selector` in the Jenkins operator.
 * `label_selector` in `jenkins_operators` in the Prow config.
-* `labels` in the job config. 
+* `labels` in the job config.
 
 For example, one would set the following options:
 * `--label-selector=master=jenkins-master` in a Jenkins operator.
@@ -107,7 +111,6 @@ jenkins_operators:
 - label_selector: master=jenkins-master
   max_concurrency: 150
   max_goroutines: 20
-  allow_cancellations: true
 ```
 
 `jenkins_operators` in the Prow config can be read by multiple running operators
@@ -137,16 +140,16 @@ The Jenkins operator acts as a Kubernetes client since it manages ProwJobs
 backed by Jenkins builds. It is expected to run as a pod inside a Kubernetes
 cluster and so it uses the in-cluster client config.
 
-## Github integration
+## GitHub integration
 
-The operator needs to talk to Github for updating commit statuses and
+The operator needs to talk to GitHub for updating commit statuses and
 adding comments about failed tests. Note that this functionality may
 potentially move into its own service, then the Jenkins operator will
-not need to contact the Github API. The required options are already
+not need to contact the GitHub API. The required options are already
 defaulted:
-* `github-token-path` set to `/etc/github/oauth`. This is the Github bot
+* `github-token-path` set to `/etc/github/oauth`. This is the GitHub bot
 oauth token that is used for updating job statuses and adding comments
-in Github.
+in GitHub.
 * `github-endpoint` set to `https://api.github.com`.
 
 

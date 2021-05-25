@@ -17,8 +17,24 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
-export PYLINTHOME=$(mktemp -d)
-pylint="$(dirname $0)/pylint_bin"
+DIR=$( cd "$( dirname "$0" )" && pwd )
+
+if [[ -n "${TEST_WORKSPACE:-}" ]]; then # Running inside bazel
+  echo "Linting python..." >&2
+elif ! command -v bazel &> /dev/null; then
+  echo "Install bazel at https://bazel.build" >&2
+  exit 1
+else
+  (
+    set -o xtrace
+    bazel test --test_output=streamed //hack:verify-pylint
+  )
+  exit 0
+fi
+    
+export PYLINTHOME=$TEST_TMPDIR
 
 shopt -s extglob globstar
-${pylint} !(gubernator|external|vendor|bazel-*)/**/*.py
+
+# TODO(clarketm): remove `boskos` exclusion after upgrading to PY3.
+"$DIR/pylint_bin" $( ls !(gubernator|external|vendor|jenkins|scenarios|triage|boskos|bazel-*)/**/*.py | grep -v analyze-memory-profiles )

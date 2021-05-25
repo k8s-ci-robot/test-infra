@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package setmilestone implements the `/milestone` command which allows members of the milestone
+// Package milestone implements the `/milestone` command which allows members of the milestone
 // maintainers team to specify a milestone to be applied to an Issue or PR.
 package milestone
 
@@ -26,6 +26,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 
+	prowconfig "k8s.io/test-infra/prow/config"
 	"k8s.io/test-infra/prow/github"
 	"k8s.io/test-infra/prow/pluginhelp"
 	"k8s.io/test-infra/prow/plugins"
@@ -35,9 +36,9 @@ const pluginName = "milestone"
 
 var (
 	milestoneRegex   = regexp.MustCompile(`(?m)^/milestone\s+(.+?)\s*$`)
-	mustBeSigLead    = "You must be a member of the [%s/%s](https://github.com/orgs/%s/teams/%s/members) github team to set the milestone."
+	mustBeAuthorized = "You must be a member of the [%s/%s](https://github.com/orgs/%s/teams/%s/members) GitHub team to set the milestone. If you believe you should be able to issue the /milestone command, please contact your %s and have them propose you as an additional delegate for this responsibility."
 	invalidMilestone = "The provided milestone is not valid for this repository. Milestones in this repository: [%s]\n\nUse `/milestone %s` to clear the milestone."
-	milestoneTeamMsg = "The milestone maintainers team is the Github team with ID: %d."
+	milestoneTeamMsg = "The milestone maintainers team is the GitHub team %q with ID: %d."
 	clearKeyword     = "clear"
 )
 
@@ -45,7 +46,7 @@ type githubClient interface {
 	CreateComment(owner, repo string, number int, comment string) error
 	ClearMilestone(org, repo string, num int) error
 	SetMilestone(org, repo string, issueNum, milestoneNum int) error
-	ListTeamMembers(id int, role string) ([]github.TeamMember, error)
+	ListTeamMembers(org string, id int, role string) ([]github.TeamMember, error)
 	ListMilestones(org, repo string) ([]github.Milestone, error)
 }
 
@@ -53,18 +54,22 @@ func init() {
 	plugins.RegisterGenericCommentHandler(pluginName, handleGenericComment, helpProvider)
 }
 
-func helpProvider(config *plugins.Configuration, enabledRepos []string) (*pluginhelp.PluginHelp, error) {
+func helpProvider(config *plugins.Configuration, enabledRepos []prowconfig.OrgRepo) (*pluginhelp.PluginHelp, error) {
+	msgForTeam := func(team plugins.Milestone) string {
+		return fmt.Sprintf(milestoneTeamMsg, team.MaintainersTeam, team.MaintainersID)
+	}
+
 	pluginHelp := &pluginhelp.PluginHelp{
 		Description: "The milestone plugin allows members of a configurable GitHub team to set the milestone on an issue or pull request.",
-		Config: func(repos []string) map[string]string {
+		Config: func(repos []prowconfig.OrgRepo) map[string]string {
 			configMap := make(map[string]string)
 			for _, repo := range repos {
-				team, exists := config.RepoMilestone[repo]
+				team, exists := config.RepoMilestone[repo.String()]
 				if exists {
-					configMap[repo] = fmt.Sprintf(milestoneTeamMsg, team)
+					configMap[repo.String()] = msgForTeam(team)
 				}
 			}
-			configMap[""] = fmt.Sprintf(milestoneTeamMsg, config.RepoMilestone[""])
+			configMap[""] = msgForTeam(config.RepoMilestone[""])
 			return configMap
 		}(enabledRepos),
 	}
@@ -82,7 +87,7 @@ func handleGenericComment(pc plugins.Agent, e github.GenericCommentEvent) error 
 	return handle(pc.GitHubClient, pc.Logger, &e, pc.PluginConfig.RepoMilestone)
 }
 
-func buildMilestoneMap(milestones []github.Milestone) map[string]int {
+func BuildMilestoneMap(milestones []github.Milestone) map[string]int {
 	m := make(map[string]int)
 	for _, ms := range milestones {
 		m[ms.Title] = ms.Number
@@ -108,7 +113,7 @@ func handle(gc githubClient, log *logrus.Entry, e *github.GenericCommentEvent, r
 		milestone = repoMilestone[""]
 	}
 
-	milestoneMaintainers, err := gc.ListTeamMembers(milestone.MaintainersID, github.RoleAll)
+	milestoneMaintainers, err := gc.ListTeamMembers(org, milestone.MaintainersID, github.RoleAll)
 	if err != nil {
 		return err
 	}
@@ -122,7 +127,7 @@ func handle(gc githubClient, log *logrus.Entry, e *github.GenericCommentEvent, r
 	}
 	if !found {
 		// not in the milestone maintainers team
-		msg := fmt.Sprintf(mustBeSigLead, org, milestone.MaintainersTeam, org, milestone.MaintainersTeam)
+		msg := fmt.Sprintf(mustBeAuthorized, org, milestone.MaintainersTeam, org, milestone.MaintainersTeam, milestone.MaintainersFriendlyName)
 		return gc.CreateComment(org, repo, e.Number, plugins.FormatResponseRaw(e.Body, e.HTMLURL, e.User.Login, msg))
 	}
 
@@ -141,7 +146,7 @@ func handle(gc githubClient, log *logrus.Entry, e *github.GenericCommentEvent, r
 		return nil
 	}
 
-	milestoneMap := buildMilestoneMap(milestones)
+	milestoneMap := BuildMilestoneMap(milestones)
 	milestoneNumber, ok := milestoneMap[proposedMilestone]
 	if !ok {
 		slice := make([]string, 0, len(milestoneMap))

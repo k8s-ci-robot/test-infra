@@ -1,6 +1,16 @@
 # See the OWNERS docs at https://go.k8s.io/owners
 
-approvers:
+reviewers:
+- amwat
+- spiffxp
 - BenTheElder
+- MushuEE
+approvers:
+- amwat
+- spiffxp
+- BenTheElder
+emeritus_approvers:
+- ixdy
+
 labels:
 - area/greenhouse

@@ -17,28 +17,35 @@ limitations under the License.
 package approvers
 
 import (
+	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/sirupsen/logrus"
 
 	"k8s.io/apimachinery/pkg/util/sets"
 
-	"path/filepath"
-	"reflect"
-	"strings"
+	"k8s.io/test-infra/prow/pkg/layeredsets"
+	"k8s.io/test-infra/prow/plugins/ownersconfig"
 )
 
 const (
-	TEST_SEED = int64(0)
+	TestSeed = int64(0)
 )
 
 type FakeRepo struct {
-	approversMap      map[string]sets.String
-	leafApproversMap  map[string]sets.String
-	noParentOwnersMap map[string]bool
+	approversMap                 map[string]layeredsets.String
+	leafApproversMap             map[string]sets.String
+	noParentOwnersMap            map[string]bool
+	autoApproveUnownedSubfolders map[string]bool
 }
 
-func (f FakeRepo) Approvers(path string) sets.String {
+func (f FakeRepo) Filenames() ownersconfig.Filenames {
+	return ownersconfig.FakeFilenames
+}
+
+func (f FakeRepo) Approvers(path string) layeredsets.String {
 	return f.approversMap[path]
 }
 
@@ -59,9 +66,8 @@ func (f FakeRepo) IsNoParentOwners(path string) bool {
 	return f.noParentOwnersMap[path]
 }
 
-type dir struct {
-	fullPath  string
-	approvers sets.String
+func (f FakeRepo) IsAutoApproveUnownedSubfolders(ownerFilePath string) bool {
+	return f.autoApproveUnownedSubfolders[ownerFilePath]
 }
 
 func canonicalize(path string) string {
@@ -71,17 +77,17 @@ func canonicalize(path string) string {
 	return strings.TrimSuffix(path, "/")
 }
 
-func createFakeRepo(la map[string]sets.String) FakeRepo {
+func createFakeRepo(leafApproversMap map[string]sets.String, modify ...func(*FakeRepo)) FakeRepo {
 	// github doesn't use / at the root
-	a := map[string]sets.String{}
-	for dir, approvers := range la {
-		la[dir] = setToLower(approvers)
-		a[dir] = setToLower(approvers)
-		starting_path := dir
+	a := map[string]layeredsets.String{}
+	for dir, approvers := range leafApproversMap {
+		leafApproversMap[dir] = setToLower(approvers)
+		a[dir] = setToLowerMulti(approvers)
+		startingPath := dir
 		for {
 			dir = canonicalize(filepath.Dir(dir))
-			if parent_approvers, ok := la[dir]; ok {
-				a[starting_path] = a[starting_path].Union(setToLower(parent_approvers))
+			if parentApprovers, ok := leafApproversMap[dir]; ok {
+				a[startingPath] = a[startingPath].Union(setToLowerMulti(parentApprovers))
 			}
 			if dir == "" {
 				break
@@ -89,13 +95,25 @@ func createFakeRepo(la map[string]sets.String) FakeRepo {
 		}
 	}
 
-	return FakeRepo{approversMap: a, leafApproversMap: la}
+	fr := FakeRepo{approversMap: a, leafApproversMap: leafApproversMap}
+	for _, m := range modify {
+		m(&fr)
+	}
+	return fr
 }
 
 func setToLower(s sets.String) sets.String {
 	lowered := sets.NewString()
 	for _, elem := range s.List() {
 		lowered.Insert(strings.ToLower(elem))
+	}
+	return lowered
+}
+
+func setToLowerMulti(s sets.String) layeredsets.String {
+	lowered := layeredsets.NewString()
+	for _, elem := range s.List() {
+		lowered.Insert(0, strings.ToLower(elem))
 	}
 	return lowered
 }
@@ -114,7 +132,7 @@ func TestCreateFakeRepo(t *testing.T) {
 		"c":       cApprovers,
 		"a/combo": edcApprovers,
 	}
-	fake_repo := createFakeRepo(FakeRepoMap)
+	fakeRepo := createFakeRepo(FakeRepoMap)
 
 	tests := []struct {
 		testName              string
@@ -155,17 +173,17 @@ func TestCreateFakeRepo(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		calculated_leaf_approvers := fake_repo.LeafApprovers(test.ownersFile)
-		calculated_approvers := fake_repo.Approvers(test.ownersFile)
+		calculatedLeafApprovers := fakeRepo.LeafApprovers(test.ownersFile)
+		calculatedApprovers := fakeRepo.Approvers(test.ownersFile)
 
 		test.expectedLeafApprovers = setToLower(test.expectedLeafApprovers)
-		if !calculated_leaf_approvers.Equal(test.expectedLeafApprovers) {
-			t.Errorf("Failed for test %v.  Expected Leaf Approvers: %v. Actual Leaf Approvers %v", test.testName, test.expectedLeafApprovers, calculated_leaf_approvers)
+		if !calculatedLeafApprovers.Equal(test.expectedLeafApprovers) {
+			t.Errorf("Failed for test %v.  Expected Leaf Approvers: %v. Actual Leaf Approvers %v", test.testName, test.expectedLeafApprovers, calculatedLeafApprovers)
 		}
 
 		test.expectedApprovers = setToLower(test.expectedApprovers)
-		if !calculated_approvers.Equal(test.expectedApprovers) {
-			t.Errorf("Failed for test %v.  Expected Approvers: %v. Actual Approvers %v", test.testName, test.expectedApprovers, calculated_approvers)
+		if !calculatedApprovers.Set().Equal(test.expectedApprovers) {
+			t.Errorf("Failed for test %v.  Expected Approvers: %v. Actual Approvers %v", test.testName, test.expectedApprovers, calculatedApprovers)
 		}
 	}
 }
@@ -222,7 +240,7 @@ func TestGetLeafApprovers(t *testing.T) {
 		testOwners := Owners{
 			filenames: test.filenames,
 			repo:      createFakeRepo(FakeRepoMap),
-			seed:      TEST_SEED,
+			seed:      TestSeed,
 			log:       logrus.WithField("plugin", "some_plugin"),
 		}
 		oMap := testOwners.GetLeafApprovers()
@@ -284,7 +302,7 @@ func TestGetOwnersSet(t *testing.T) {
 		testOwners := Owners{
 			filenames: test.filenames,
 			repo:      createFakeRepo(FakeRepoMap),
-			seed:      TEST_SEED,
+			seed:      TestSeed,
 			log:       logrus.WithField("plugin", "some_plugin"),
 		}
 		oSet := testOwners.GetOwnersSet()
@@ -360,7 +378,7 @@ func TestGetSuggestedApprovers(t *testing.T) {
 		testOwners := Owners{
 			filenames: test.filenames,
 			repo:      createFakeRepo(FakeRepoMap),
-			seed:      TEST_SEED,
+			seed:      TestSeed,
 			log:       logrus.WithField("plugin", "some_plugin"),
 		}
 		suggested := testOwners.GetSuggestedApprovers(testOwners.GetReverseMap(testOwners.GetLeafApprovers()), testOwners.GetShuffledApprovers())
@@ -446,7 +464,7 @@ func TestGetAllPotentialApprovers(t *testing.T) {
 		testOwners := Owners{
 			filenames: test.filenames,
 			repo:      createFakeRepo(FakeRepoMap),
-			seed:      TEST_SEED,
+			seed:      TestSeed,
 			log:       logrus.WithField("plugin", "some_plugin"),
 		}
 		all := testOwners.GetAllPotentialApprovers()
@@ -527,7 +545,7 @@ func TestFindMostCoveringApprover(t *testing.T) {
 		testOwners := Owners{
 			filenames: test.filenames,
 			repo:      createFakeRepo(FakeRepoMap),
-			seed:      TEST_SEED,
+			seed:      TestSeed,
 			log:       logrus.WithField("plugin", "some_plugin"),
 		}
 		bestPerson := findMostCoveringApprover(testOwners.GetAllPotentialApprovers(), testOwners.GetReverseMap(testOwners.GetLeafApprovers()), test.unapproved)
@@ -588,7 +606,7 @@ func TestGetReverseMap(t *testing.T) {
 		testOwners := Owners{
 			filenames: test.filenames,
 			repo:      createFakeRepo(FakeRepoMap),
-			seed:      TEST_SEED,
+			seed:      TestSeed,
 			log:       logrus.WithField("plugin", "some_plugin"),
 		}
 		calculatedRevMap := testOwners.GetReverseMap(testOwners.GetLeafApprovers())

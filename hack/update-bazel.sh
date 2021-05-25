@@ -17,28 +17,43 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
-# https://github.com/kubernetes/test-infra/issues/5699#issuecomment-348350792
-cd $(git rev-parse --show-toplevel)
 
-# Old way of running gazelle and kazel by first go installing them
-deprecated-update() {
-  OUTPUT_GOBIN="./_output/bin"
-  GOBIN="${OUTPUT_GOBIN}" go install ./vendor/github.com/bazelbuild/bazel-gazelle/cmd/gazelle
-  GOBIN="${OUTPUT_GOBIN}" go install ./vendor/github.com/kubernetes/repo-infra/kazel
+bazel-from-image() {
+	if [ -x "$(command -v docker)" ]; then
+	    CONTAINER_ENGINE=docker
+	elif [ -x "$(command -v podman)" ]; then
+	    CONTAINER_ENGINE=podman
+	else
+		echo "There is no docker or podman installed. Please use hack/update-bazel.sh script instead."
+		exit 1
+	fi
 
-  "${OUTPUT_GOBIN}/gazelle" fix --external=vendored --mode=fix
-  "${OUTPUT_GOBIN}/kazel" --cfg-path=./hack/.kazelcfg.json
+	WORKDIR=$(pwd)
+	TEST_INFRA_PATH=${WORKDIR%/hack}
+
+
+	$CONTAINER_ENGINE run --user $(id -u):$(id -g) --volume ${TEST_INFRA_PATH}:/test-infra:Z \
+	--workdir /test-infra --rm gcr.io/k8s-testimages/launcher.gcr.io/google/bazel:latest-test-infra $@
 }
 
-# Ensure ./vendor/BUILD.bazel exists
-mkdir -p ./vendor
-touch "./vendor/BUILD.bazel"
+bazel-direct() {
+  bazel $@
+}
 
-if ! which bazel &> /dev/null; then
-  echo "Bazel is the preferred way to build and test the test-infra repo." >&2
-  echo "Please install bazel at https://bazel.build/ (future commits may require it)" >&2
-  deprecated-update
-  exit 0
+bazel-from-bazelisk() {
+  bazelisk $@
+}
+
+if [[ "${1:-}" == "--from-image" ]]; then
+	bazel=bazel-from-image
+elif [ -x "$(command -v bazelisk)" ]; then
+  bazel=bazel-from-bazelisk
+elif [ -x "$(command -v bazel)" ]; then
+  bazel=bazel-direct
+else
+  bazel=bazel-from-image
 fi
-bazel run //:gazelle
-bazel run //:kazel
+
+"$bazel" run @io_k8s_repo_infra//hack:update-bazel
+
+exit $?

@@ -2,37 +2,43 @@ presubmits:
   kubernetes/cloud-provider-aws:
   - name: pull-cloud-provider-aws-check
     always_run: true
-    branches:
-    - master
+    decorate: true
+    skip_branches:
+    - gh-pages
+    path_alias: k8s.io/cloud-provider-aws
     labels:
       preset-service-account: "true"
     spec:
       containers:
-      - image: gcr.io/k8s-testimages/kubekins-e2e:v20181129-33929460d-master
+      - image: gcr.io/k8s-testimages/kubekins-e2e:v20210512-b8d1b30-master
+        command:
+        - runner.sh
         args:
-        - "--repo=k8s.io/$(REPO_NAME)=$(PULL_REFS)"
-        - "--root=/go/src"
-        - "--upload=gs://kubernetes-jenkins/pr-logs"
-        - --scenario=execute
-        - --
         - make
         - check
-
+    annotations:
+      testgrid-dashboards: provider-aws-cloud-provider-aws
+      testgrid-tab-name: check
+      description: aws cloud provider checks
+      testgrid-num-columns-recent: '30'
   - name: pull-cloud-provider-aws-test
     always_run: true
-    branches:
-    - master
+    decorate: true
+    skip_branches:
+    - gh-pages
+    path_alias: k8s.io/cloud-provider-aws
     labels:
       preset-service-account: "true"
     spec:
       containers:
-      - image: gcr.io/k8s-testimages/kubekins-e2e:v20181129-33929460d-master
+      - image: gcr.io/k8s-testimages/kubekins-e2e:v20210512-b8d1b30-master
+        command:
+        - runner.sh
         args:
-        - "--repo=k8s.io/$(REPO_NAME)=$(PULL_REFS)"
-        - "--root=/go/src"
-        - "--upload=gs://kubernetes-jenkins/pr-logs"
-        - --scenario=execute
-        - --
         - make
         - test
-
+    annotations:
+      testgrid-dashboards: provider-aws-cloud-provider-aws
+      testgrid-tab-name: test
+      description: aws cloud provider tests
+      testgrid-num-columns-recent: '30'

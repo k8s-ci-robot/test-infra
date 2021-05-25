@@ -20,35 +20,100 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"sync"
+	"time"
 
-	"cloud.google.com/go/storage"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/sync/semaphore"
+	utilerrors "k8s.io/apimachinery/pkg/util/errors"
+	utilpointer "k8s.io/utils/pointer"
 
-	"k8s.io/test-infra/prow/errorutil"
+	pkgio "k8s.io/test-infra/prow/io"
+	"k8s.io/test-infra/prow/io/providers"
 )
 
 // UploadFunc knows how to upload into an object
-type UploadFunc func(obj *storage.ObjectHandle) error
+type UploadFunc func(writer dataWriter) error
+
+type destToWriter func(dest string) dataWriter
+
+const retryCount = 4
 
 // Upload uploads all of the data in the
-// uploadTargets map to GCS in parallel. The map is
-// keyed on GCS path under the bucket
-func Upload(bucket *storage.BucketHandle, uploadTargets map[string]UploadFunc) error {
+// uploadTargets map to blob storage in parallel. The map is
+// keyed on blob storage path under the bucket
+func Upload(ctx context.Context, bucket, gcsCredentialsFile, s3CredentialsFile string, uploadTargets map[string]UploadFunc) error {
+	parsedBucket, err := url.Parse(bucket)
+	if err != nil {
+		return fmt.Errorf("cannot parse bucket name %s: %w", bucket, err)
+	}
+	if parsedBucket.Scheme == "" {
+		parsedBucket.Scheme = providers.GS
+	}
+
+	opener, err := pkgio.NewOpener(ctx, gcsCredentialsFile, s3CredentialsFile)
+	if err != nil {
+		return fmt.Errorf("new opener: %w", err)
+	}
+	dtw := func(dest string) dataWriter {
+		return &openerObjectWriter{Opener: opener, Context: ctx, Bucket: parsedBucket.String(), Dest: dest}
+	}
+	return upload(dtw, uploadTargets)
+}
+
+// LocalExport copies all of the data in the uploadTargets map to local files in parallel. The map
+// is keyed on file path under the exportDir.
+func LocalExport(ctx context.Context, exportDir string, uploadTargets map[string]UploadFunc) error {
+	opener, err := pkgio.NewOpener(ctx, "", "")
+	if err != nil {
+		return fmt.Errorf("new opener: %w", err)
+	}
+	dtw := func(dest string) dataWriter {
+		return &openerObjectWriter{Opener: opener, Context: ctx, Bucket: exportDir, Dest: dest}
+	}
+	return upload(dtw, uploadTargets)
+}
+
+func upload(dtw destToWriter, uploadTargets map[string]UploadFunc) error {
 	errCh := make(chan error, len(uploadTargets))
 	group := &sync.WaitGroup{}
+	sem := semaphore.NewWeighted(4)
 	group.Add(len(uploadTargets))
 	for dest, upload := range uploadTargets {
-		obj := bucket.Object(dest)
-		logrus.WithField("dest", dest).Info("Queued for upload")
-		go func(f UploadFunc, obj *storage.ObjectHandle, name string) {
+		log := logrus.WithField("dest", dest)
+		log.Info("Queued for upload")
+		go func(f UploadFunc, writer dataWriter, log *logrus.Entry) {
 			defer group.Done()
-			if err := f(obj); err != nil {
-				errCh <- err
+
+			var err error
+
+			for retryIndex := 1; retryIndex <= retryCount; retryIndex++ {
+				err = func() error {
+					sem.Acquire(context.Background(), 1)
+					defer sem.Release(1)
+					if retryIndex > 1 {
+						log.WithField("retry_attempt", retryIndex).Debugf("Retrying upload")
+					}
+					return f(writer)
+				}()
+
+				if err == nil {
+					break
+				}
+				if retryIndex < retryCount {
+					time.Sleep(time.Duration(retryIndex*retryIndex) * time.Second)
+				}
 			}
-			logrus.WithField("dest", name).Info("Finished upload")
-		}(upload, obj, dest)
+
+			if err != nil {
+				errCh <- err
+				log.Info("Failed upload")
+			} else {
+				log.Info("Finished upload")
+			}
+		}(upload, dtw(dest), log)
 	}
 	group.Wait()
 	close(errCh)
@@ -59,34 +124,114 @@ func Upload(bucket *storage.BucketHandle, uploadTargets map[string]UploadFunc) e
 		}
 		return fmt.Errorf("encountered errors during upload: %v", uploadErrors)
 	}
-
 	return nil
 }
 
 // FileUpload returns an UploadFunc which copies all
 // data from the file on disk to the GCS object
 func FileUpload(file string) UploadFunc {
-	return func(obj *storage.ObjectHandle) error {
+	return FileUploadWithOptions(file, pkgio.WriterOptions{})
+}
+
+// FileUploadWithOptions returns an UploadFunc which copies all data
+// from the file on disk into GCS object and also sets the provided
+// attributes on the object.
+func FileUploadWithOptions(file string, opts pkgio.WriterOptions) UploadFunc {
+	return func(writer dataWriter) error {
 		reader, err := os.Open(file)
 		if err != nil {
 			return err
 		}
+		if fi, err := reader.Stat(); err == nil {
+			opts.BufferSize = utilpointer.Int64Ptr(fi.Size())
+			if *opts.BufferSize > 25*1024*1024 {
+				*opts.BufferSize = 25 * 1024 * 1024
+			}
+		}
 
-		uploadErr := DataUpload(reader)(obj)
+		uploadErr := DataUploadWithOptions(reader, opts)(writer)
+		if uploadErr != nil {
+			uploadErr = fmt.Errorf("upload error: %v", uploadErr)
+		}
 		closeErr := reader.Close()
+		if closeErr != nil {
+			closeErr = fmt.Errorf("reader close error: %v", closeErr)
+		}
 
-		return errorutil.NewAggregate(uploadErr, closeErr)
+		return utilerrors.NewAggregate([]error{uploadErr, closeErr})
 	}
 }
 
 // DataUpload returns an UploadFunc which copies all
-// data from src reader into GCS
+// data from src reader into GCS.
 func DataUpload(src io.Reader) UploadFunc {
-	return func(obj *storage.ObjectHandle) error {
-		writer := obj.NewWriter(context.Background())
-		_, copyErr := io.Copy(writer, src)
-		closeErr := writer.Close()
+	return DataUploadWithOptions(src, pkgio.WriterOptions{})
+}
 
-		return errorutil.NewAggregate(copyErr, closeErr)
+// DataUploadWithMetadata returns an UploadFunc which copies all
+// data from src reader into GCS and also sets the provided metadata
+// fields onto the object.
+func DataUploadWithMetadata(src io.Reader, metadata map[string]string) UploadFunc {
+	return DataUploadWithOptions(src, pkgio.WriterOptions{Metadata: metadata})
+}
+
+// DataUploadWithOptions returns an UploadFunc which copies all data
+// from src reader into GCS and also sets the provided attributes on
+// the object.
+func DataUploadWithOptions(src io.Reader, attrs pkgio.WriterOptions) UploadFunc {
+	return func(writer dataWriter) error {
+		writer.ApplyWriterOptions(attrs)
+		_, copyErr := io.Copy(writer, src)
+		if copyErr != nil {
+			copyErr = fmt.Errorf("copy error: %v", copyErr)
+		}
+		closeErr := writer.Close()
+		if closeErr != nil {
+			closeErr = fmt.Errorf("writer close error: %v", closeErr)
+		}
+		return utilerrors.NewAggregate([]error{copyErr, closeErr})
 	}
+}
+
+type dataWriter interface {
+	io.WriteCloser
+	ApplyWriterOptions(opts pkgio.WriterOptions)
+}
+
+type openerObjectWriter struct {
+	pkgio.Opener
+	Context     context.Context
+	Bucket      string
+	Dest        string
+	opts        []pkgio.WriterOptions
+	writeCloser pkgio.WriteCloser
+}
+
+func (w *openerObjectWriter) Write(p []byte) (n int, err error) {
+	if w.writeCloser == nil {
+		w.writeCloser, err = w.Opener.Writer(w.Context, fmt.Sprintf("%s/%s", w.Bucket, w.Dest), w.opts...)
+		if err != nil {
+			return 0, err
+		}
+	}
+	return w.writeCloser.Write(p)
+}
+
+func (w *openerObjectWriter) Close() error {
+	if w.writeCloser == nil {
+		// Always create a writer even if Write() was never called
+		// otherwise empty files are never created, because Write() is
+		// never called for them
+		if _, err := w.Write([]byte("")); err != nil {
+			return err
+		}
+	}
+
+	err := w.writeCloser.Close()
+	w.writeCloser = nil
+	return err
+}
+
+func (w *openerObjectWriter) ApplyWriterOptions(opts pkgio.WriterOptions) {
+	w.opts = append(w.opts, opts)
 }

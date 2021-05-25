@@ -22,13 +22,14 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/test-infra/prow/config"
 	"k8s.io/test-infra/prow/github"
 	"k8s.io/test-infra/prow/pluginhelp"
 	"k8s.io/test-infra/prow/plugins"
 )
 
 const (
-	// PluginName is the name of this plugin
+	// PluginName defines this plugin's registered name.
 	PluginName = "owners-label"
 )
 
@@ -36,7 +37,7 @@ func init() {
 	plugins.RegisterPullRequestHandler(PluginName, handlePullRequest, helpProvider)
 }
 
-func helpProvider(config *plugins.Configuration, enabledRepos []string) (*pluginhelp.PluginHelp, error) {
+func helpProvider(config *plugins.Configuration, _ []config.OrgRepo) (*pluginhelp.PluginHelp, error) {
 	return &pluginhelp.PluginHelp{
 			Description: "The owners-label plugin automatically adds labels to PRs based on the files they touch. Specifically, the 'labels' sections of OWNERS files are used to determine which labels apply to the changes.",
 		},
@@ -72,6 +73,20 @@ func handle(ghc githubClient, oc ownersClient, log *logrus.Entry, pre *github.Pu
 	repo := pre.Repo.Name
 	number := pre.Number
 
+	// First see if there are any labels requested based on the files changed.
+	changes, err := ghc.GetPullRequestChanges(org, repo, number)
+	if err != nil {
+		return fmt.Errorf("error getting PR changes: %v", err)
+	}
+	neededLabels := sets.NewString()
+	for _, change := range changes {
+		neededLabels.Insert(oc.FindLabelsForFile(change.Filename).List()...)
+	}
+	if neededLabels.Len() == 0 {
+		// No labels requested for the given files. Return now to save API tokens.
+		return nil
+	}
+
 	repoLabels, err := ghc.GetRepoLabels(org, repo)
 	if err != nil {
 		return err
@@ -85,28 +100,19 @@ func handle(ghc githubClient, oc ownersClient, log *logrus.Entry, pre *github.Pu
 	for _, label := range repoLabels {
 		RepoLabelsExisting.Insert(label.Name)
 	}
-	changes, err := ghc.GetPullRequestChanges(org, repo, number)
-	if err != nil {
-		return fmt.Errorf("error getting PR changes: %v", err)
-	}
 	currentLabels := sets.NewString()
 	for _, label := range issuelabels {
 		currentLabels.Insert(label.Name)
 	}
-	neededLabels := sets.NewString()
-	for _, change := range changes {
-		neededLabels.Insert(oc.FindLabelsForFile(change.Filename).List()...)
-	}
 
 	nonexistent := sets.NewString()
-
 	for _, labelToAdd := range neededLabels.Difference(currentLabels).List() {
 		if !RepoLabelsExisting.Has(labelToAdd) {
 			nonexistent.Insert(labelToAdd)
 			continue
 		}
 		if err := ghc.AddLabel(org, repo, number, labelToAdd); err != nil {
-			log.WithError(err).Errorf("Github failed to add the following label: %s", labelToAdd)
+			log.WithError(err).Errorf("GitHub failed to add the following label: %s", labelToAdd)
 		}
 	}
 

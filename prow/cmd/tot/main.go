@@ -32,8 +32,12 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
+	"k8s.io/test-infra/prow/pjutil/pprof"
 
 	"k8s.io/test-infra/prow/config"
+	prowflagutil "k8s.io/test-infra/prow/flagutil"
+	configflagutil "k8s.io/test-infra/prow/flagutil/config"
+	"k8s.io/test-infra/prow/interrupts"
 	"k8s.io/test-infra/prow/logrusutil"
 	"k8s.io/test-infra/prow/pjutil"
 	"k8s.io/test-infra/prow/pod-utils/downwardapi"
@@ -47,9 +51,9 @@ type options struct {
 	useFallback bool
 	fallbackURI string
 
-	configPath     string
-	jobConfigPath  string
-	fallbackBucket string
+	config                 configflagutil.ConfigOptions
+	fallbackBucket         string
+	instrumentationOptions prowflagutil.InstrumentationOptions
 }
 
 func gatherOptions() options {
@@ -63,21 +67,20 @@ func gatherOptions() options {
 		"URL template to fallback to for jobs that lack a last vended build number.",
 	)
 
-	flag.StringVar(&o.configPath, "config-path", "", "Path to prow config.")
-	flag.StringVar(&o.jobConfigPath, "job-config-path", "", "Path to prow job configs.")
+	o.config.AddFlags(flag.CommandLine)
 	flag.StringVar(&o.fallbackBucket, "fallback-bucket", "",
 		"Fallback to top-level bucket for jobs that lack a last vended build number. The bucket layout is expected to follow https://github.com/kubernetes/test-infra/tree/master/gubernator#gcs-bucket-layout",
 	)
-
+	o.instrumentationOptions.AddFlags(flag.CommandLine)
 	flag.Parse()
 	return o
 }
 
 func (o *options) Validate() error {
-	if o.configPath != "" && o.fallbackBucket == "" {
-		return errors.New("you need to provide a bucket to fallback to when the prow config is specified")
+	if err := o.config.Validate(false); err != nil {
+		return err
 	}
-	if o.configPath == "" && o.fallbackBucket != "" {
+	if o.config.ConfigPath == "" && o.fallbackBucket != "" {
 		return errors.New("you need to provide the prow config when a fallback bucket is specified")
 	}
 	return nil
@@ -233,14 +236,14 @@ func (f fallbackHandler) getURL(jobName string) string {
 	var spec *downwardapi.JobSpec
 	cfg := f.configAgent.Config()
 
-	for _, pre := range cfg.AllPresubmits(nil) {
+	for _, pre := range cfg.AllStaticPresubmits(nil) {
 		if jobName == pre.Name {
 			spec = pjutil.PresubmitToJobSpec(pre)
 			break
 		}
 	}
 	if spec == nil {
-		for _, post := range cfg.AllPostsubmits(nil) {
+		for _, post := range cfg.AllStaticPostsubmits(nil) {
 			if jobName == post.Name {
 				spec = pjutil.PostsubmitToJobSpec(post)
 				break
@@ -269,13 +272,17 @@ func (f fallbackHandler) getURL(jobName string) string {
 }
 
 func main() {
+	logrusutil.ComponentInit()
+
 	o := gatherOptions()
 	if err := o.Validate(); err != nil {
 		logrus.Fatalf("Invalid options: %v", err)
 	}
-	logrus.SetFormatter(
-		logrusutil.NewDefaultFieldsFormatter(nil, logrus.Fields{"component": "tot"}),
-	)
+
+	defer interrupts.WaitForGracefulShutdown()
+
+	pprof.Instrument(o.instrumentationOptions)
+	health := pjutil.NewHealthOnPort(o.instrumentationOptions.HealthPort)
 
 	s, err := newStore(o.storagePath)
 	if err != nil {
@@ -284,9 +291,10 @@ func main() {
 
 	if o.useFallback {
 		var configAgent *config.Agent
-		if o.configPath != "" {
-			configAgent = &config.Agent{}
-			if err := configAgent.Start(o.configPath, o.jobConfigPath); err != nil {
+		if o.config.ConfigPath != "" {
+			var err error
+			configAgent, err = o.config.ConfigAgent()
+			if err != nil {
 				logrus.WithError(err).Fatal("Error starting config agent.")
 			}
 		}
@@ -298,7 +306,9 @@ func main() {
 		}.get
 	}
 
-	http.HandleFunc("/vend/", s.handle)
-
-	logrus.Fatal(http.ListenAndServe(":"+strconv.Itoa(o.port), nil))
+	mux := http.NewServeMux()
+	mux.HandleFunc("/vend/", s.handle)
+	server := &http.Server{Addr: ":" + strconv.Itoa(o.port), Handler: mux}
+	health.ServeReady()
+	interrupts.ListenAndServe(server, 5*time.Second)
 }

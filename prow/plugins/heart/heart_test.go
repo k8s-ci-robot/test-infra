@@ -23,6 +23,7 @@ import (
 
 	"k8s.io/test-infra/prow/github"
 	"k8s.io/test-infra/prow/github/fakegithub"
+	"k8s.io/test-infra/prow/plugins/ownersconfig"
 )
 
 func TestHandlePR(t *testing.T) {
@@ -90,6 +91,18 @@ func TestHandlePR(t *testing.T) {
 			},
 			expectedReactionAdded: false,
 		},
+		// PR opened against kubernetes/kubernetes that adds 1 line to
+		// an OWNERS_ALIASES file
+		{
+			prAction: github.PullRequestActionOpened,
+			changes: []github.PullRequestChange{
+				{
+					Filename:  "foo/bar/OWNERS_ALIASES",
+					Additions: 1,
+				},
+			},
+			expectedReactionAdded: true,
+		},
 	}
 
 	for _, tc := range testcases {
@@ -98,20 +111,19 @@ func TestHandlePR(t *testing.T) {
 			Number:      basicPR.Number,
 			PullRequest: basicPR,
 		}
-		fakeGitHubClient := &fakegithub.FakeClient{
-			PullRequests: map[int]*github.PullRequest{
-				basicPR.Number: &basicPR,
-			},
-			PullRequestChanges: map[int][]github.PullRequestChange{
-				basicPR.Number: tc.changes,
-			},
+		fakeGitHubClient := fakegithub.NewFakeClient()
+		fakeGitHubClient.PullRequests = map[int]*github.PullRequest{
+			basicPR.Number: &basicPR,
+		}
+		fakeGitHubClient.PullRequestChanges = map[int][]github.PullRequestChange{
+			basicPR.Number: tc.changes,
 		}
 		fakeClient := client{
 			GitHubClient: fakeGitHubClient,
 			Logger:       logrus.WithField("plugin", pluginName),
 		}
 
-		err := handlePR(fakeClient, event)
+		err := handlePR(fakeClient, event, ownersconfig.FakeResolver)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -17,49 +17,98 @@ limitations under the License.
 package trigger
 
 import (
+	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/sirupsen/logrus"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/util/wait"
 
+	prowapi "k8s.io/test-infra/prow/apis/prowjobs/v1"
 	"k8s.io/test-infra/prow/config"
+	"k8s.io/test-infra/prow/git/v2"
 	"k8s.io/test-infra/prow/github"
-	"k8s.io/test-infra/prow/kube"
 	"k8s.io/test-infra/prow/pjutil"
 	"k8s.io/test-infra/prow/pluginhelp"
 	"k8s.io/test-infra/prow/plugins"
 )
 
 const (
-	pluginName = "trigger"
+	// PluginName is the name of the trigger plugin
+	PluginName = "trigger"
 )
 
-func init() {
-	plugins.RegisterGenericCommentHandler(pluginName, handleGenericCommentEvent, helpProvider)
-	plugins.RegisterPullRequestHandler(pluginName, handlePullRequest, helpProvider)
-	plugins.RegisterPushEventHandler(pluginName, handlePush, helpProvider)
+// untrustedReason represents a combination (by ORing the appropriate consts) of reasons
+// why a user is not trusted by TrustedUser. It is used to generate messaging for users.
+type untrustedReason int
+
+const (
+	notMember untrustedReason = 1 << iota
+	notCollaborator
+	notSecondaryMember
+)
+
+// String constructs a string explaining the reason for a user's denial of trust
+// from untrustedReason as described above.
+func (u untrustedReason) String() string {
+	var response string
+	if u&notMember != 0 {
+		response += "User is not a member of the org. "
+	}
+	if u&notCollaborator != 0 {
+		response += "User is not a collaborator. "
+	}
+	if u&notSecondaryMember != 0 {
+		response += "User is not a member of the trusted secondary org. "
+	}
+	response += "Satisfy at least one of these conditions to make the user trusted."
+	return response
 }
 
-func helpProvider(config *plugins.Configuration, enabledRepos []string) (*pluginhelp.PluginHelp, error) {
+func init() {
+	plugins.RegisterGenericCommentHandler(PluginName, handleGenericCommentEvent, helpProvider)
+	plugins.RegisterPullRequestHandler(PluginName, handlePullRequest, helpProvider)
+	plugins.RegisterPushEventHandler(PluginName, handlePush, helpProvider)
+}
+
+func helpProvider(config *plugins.Configuration, enabledRepos []config.OrgRepo) (*pluginhelp.PluginHelp, error) {
 	configInfo := map[string]string{}
-	for _, orgRepo := range enabledRepos {
-		parts := strings.Split(orgRepo, "/")
-		if len(parts) != 2 {
-			return nil, fmt.Errorf("invalid repo in enabledRepos: %q", orgRepo)
-		}
-		org, repoName := parts[0], parts[1]
-		if trigger := config.TriggerFor(org, repoName); trigger != nil && trigger.TrustedOrg != "" {
+	for _, repo := range enabledRepos {
+		trigger := config.TriggerFor(repo.Org, repo.Repo)
+		org := repo.Org
+		if trigger.TrustedOrg != "" {
 			org = trigger.TrustedOrg
 		}
-		configInfo[orgRepo] = fmt.Sprintf("The trusted Github organization for this repository is %q.", org)
+		configInfo[repo.String()] = fmt.Sprintf("The trusted GitHub organization for this repository is %q.", org)
+	}
+	yamlSnippet, err := plugins.CommentMap.GenYaml(&plugins.Configuration{
+		Triggers: []plugins.Trigger{
+			{
+				Repos: []string{
+					"org/repo1",
+					"org/repo2",
+				},
+				JoinOrgURL:     "https://github.com/kubernetes/community/blob/master/community-membership.md",
+				OnlyOrgMembers: true,
+				IgnoreOkToTest: true,
+			},
+		},
+	})
+	if err != nil {
+		logrus.WithError(err).Warnf("cannot generate comments for %s plugin", PluginName)
 	}
 	pluginHelp := &pluginhelp.PluginHelp{
 		Description: `The trigger plugin starts tests in reaction to commands and pull request events. It is responsible for ensuring that test jobs are only run on trusted PRs. A PR is considered trusted if the author is a member of the 'trusted organization' for the repository or if such a member has left an '/ok-to-test' command on the PR.
 <br>Trigger starts jobs automatically when a new trusted PR is created or when an untrusted PR becomes trusted, but it can also be used to start jobs manually via the '/test' command.
 <br>The '/retest' command can be used to rerun jobs that have reported failure.`,
-		Config: configInfo,
+		Config:  configInfo,
+		Snippet: yamlSnippet,
 	}
 	pluginHelp.AddCommand(pluginhelp.Command{
 		Usage:       "/ok-to-test",
@@ -69,8 +118,8 @@ func helpProvider(config *plugins.Configuration, enabledRepos []string) (*plugin
 		Examples:    []string{"/ok-to-test"},
 	})
 	pluginHelp.AddCommand(pluginhelp.Command{
-		Usage:       "/test (<job name>|all)",
-		Description: "Manually starts a/all test job(s).",
+		Usage:       "/test [<job name>|all]",
+		Description: "Manually starts a/all test job(s). Lists all possible job(s) when no jobs/an invalid job are specified.",
 		Featured:    true,
 		WhoCanUse:   "Anyone can trigger this command on a trusted PR.",
 		Examples:    []string{"/test all", "/test pull-bazel-test"},
@@ -82,12 +131,19 @@ func helpProvider(config *plugins.Configuration, enabledRepos []string) (*plugin
 		WhoCanUse:   "Anyone can trigger this command on a trusted PR.",
 		Examples:    []string{"/retest"},
 	})
+	pluginHelp.AddCommand(pluginhelp.Command{
+		Usage:       "/test ?",
+		Description: "List available test job(s) for a trusted PR.",
+		Featured:    true,
+		WhoCanUse:   "Anyone can trigger this command on a trusted PR.",
+		Examples:    []string{"/test ?"},
+	})
 	return pluginHelp, nil
 }
 
 type githubClient interface {
 	AddLabel(org, repo string, number int, label string) error
-	BotName() (string, error)
+	BotUserChecker() (func(candidate string) bool, error)
 	IsCollaborator(org, repo, user string) (bool, error)
 	IsMember(org, user string) (bool, error)
 	GetPullRequest(org, repo string, number int) (*github.PullRequest, error)
@@ -102,28 +158,42 @@ type githubClient interface {
 	GetIssueLabels(org, repo string, number int) ([]github.Label, error)
 }
 
-type kubeClient interface {
-	CreateProwJob(kube.ProwJob) (kube.ProwJob, error)
+type trustedPullRequestClient interface {
+	GetIssueLabels(org, repo string, number int) ([]github.Label, error)
+	trustedUserClient
 }
 
-type client struct {
-	GitHubClient githubClient
-	KubeClient   kubeClient
-	Config       *config.Config
-	Logger       *logrus.Entry
+type prowJobClient interface {
+	Create(context.Context, *prowapi.ProwJob, metav1.CreateOptions) (*prowapi.ProwJob, error)
+	List(ctx context.Context, opts metav1.ListOptions) (*prowapi.ProwJobList, error)
+	Update(context.Context, *prowapi.ProwJob, metav1.UpdateOptions) (*prowapi.ProwJob, error)
 }
 
+// Client holds the necessary structures to work with prow via logging, github, kubernetes and its configuration.
+//
+// TODO(fejta): consider exporting an interface rather than a struct
+type Client struct {
+	GitHubClient  githubClient
+	ProwJobClient prowJobClient
+	Config        *config.Config
+	Logger        *logrus.Entry
+	GitClient     git.ClientFactory
+}
+
+// trustedUserClient is used to check is user member and repo collaborator
 type trustedUserClient interface {
 	IsCollaborator(org, repo, user string) (bool, error)
 	IsMember(org, user string) (bool, error)
+	BotUserChecker() (func(candidate string) bool, error)
 }
 
-func getClient(pc plugins.Agent) client {
-	return client{
-		GitHubClient: pc.GitHubClient,
-		Config:       pc.Config,
-		KubeClient:   pc.KubeClient,
-		Logger:       pc.Logger,
+func getClient(pc plugins.Agent) Client {
+	return Client{
+		GitHubClient:  pc.GitHubClient,
+		Config:        pc.Config,
+		ProwJobClient: pc.ProwJobClient,
+		Logger:        pc.Logger,
+		GitClient:     pc.GitClient,
 	}
 }
 
@@ -140,18 +210,35 @@ func handlePush(pc plugins.Agent, pe github.PushEvent) error {
 	return handlePE(getClient(pc), pe)
 }
 
+// TrustedUserResponse is a response from TrustedUser. It contains the boolean response for trust as well
+// a reason for denial if the user is not trusted.
+type TrustedUserResponse struct {
+	IsTrusted bool
+	// Reason contains the reason that a user is not trusted if IsTrusted is false
+	Reason string
+}
+
 // TrustedUser returns true if user is trusted in repo.
-//
 // Trusted users are either repo collaborators, org members or trusted org members.
-// Whether repo collaborators and/or a second org is trusted is configured by trigger.
-func TrustedUser(ghc trustedUserClient, trigger *plugins.Trigger, user, org, repo string) (bool, error) {
+func TrustedUser(ghc trustedUserClient, onlyOrgMembers bool, trustedOrg, user, org, repo string) (TrustedUserResponse, error) {
+	errorResponse := TrustedUserResponse{IsTrusted: false}
+	okResponse := TrustedUserResponse{IsTrusted: true}
+
+	selfChecker, err := ghc.BotUserChecker()
+	if err != nil {
+		return errorResponse, fmt.Errorf("failed to check if comment came from myself: %w", err)
+	}
+	// Trust thyself
+	if selfChecker(user) {
+		return okResponse, nil
+	}
+
 	// First check if user is a collaborator, assuming this is allowed
-	allowCollaborators := trigger == nil || !trigger.OnlyOrgMembers
-	if allowCollaborators {
+	if !onlyOrgMembers {
 		if ok, err := ghc.IsCollaborator(org, repo, user); err != nil {
-			return false, fmt.Errorf("error in IsCollaborator: %v", err)
+			return errorResponse, fmt.Errorf("error in IsCollaborator: %v", err)
 		} else if ok {
-			return true, nil
+			return okResponse, nil
 		}
 	}
 
@@ -159,129 +246,119 @@ func TrustedUser(ghc trustedUserClient, trigger *plugins.Trigger, user, org, rep
 
 	// Next see if the user is an org member
 	if member, err := ghc.IsMember(org, user); err != nil {
-		return false, fmt.Errorf("error in IsMember(%s): %v", org, err)
+		return errorResponse, fmt.Errorf("error in IsMember(%s): %v", org, err)
 	} else if member {
-		return true, nil
+		return okResponse, nil
 	}
 
-	// Determine if there is a second org to check
-	if trigger == nil || trigger.TrustedOrg == "" || trigger.TrustedOrg == org {
-		return false, nil // No trusted org and/or it is the same
+	// Determine if there is a second org to check. If there is no secondary org or they are the same, the result
+	// is the same because the user already failed the check for the primary org.
+	if trustedOrg == "" || trustedOrg == org {
+		// the if/else is only to improve error messaging
+		if onlyOrgMembers {
+			return TrustedUserResponse{IsTrusted: false, Reason: notMember.String()}, nil // No trusted org and/or it is the same
+		}
+		return TrustedUserResponse{IsTrusted: false, Reason: (notMember | notCollaborator).String()}, nil // No trusted org and/or it is the same
 	}
 
 	// Check the second trusted org.
-	member, err := ghc.IsMember(trigger.TrustedOrg, user)
+	member, err := ghc.IsMember(trustedOrg, user)
 	if err != nil {
-		return false, fmt.Errorf("error in IsMember(%s): %v", trigger.TrustedOrg, err)
+		return errorResponse, fmt.Errorf("error in IsMember(%s): %v", trustedOrg, err)
+	} else if member {
+		return okResponse, nil
 	}
-	return member, nil
+
+	// the if/else is only to improve error messaging
+	if onlyOrgMembers {
+		return TrustedUserResponse{IsTrusted: false, Reason: (notMember | notSecondaryMember).String()}, nil
+	}
+	return TrustedUserResponse{IsTrusted: false, Reason: (notMember | notSecondaryMember | notCollaborator).String()}, nil
 }
 
-func fileChangesGetter(ghc githubClient, org, repo string, num int) func() ([]string, error) {
-	var changedFiles []string
-	return func() ([]string, error) {
-		// Fetch the changed files from github at most once.
-		if changedFiles == nil {
-			changes, err := ghc.GetPullRequestChanges(org, repo, num)
-			if err != nil {
-				return nil, fmt.Errorf("error getting pull request changes: %v", err)
-			}
-			changedFiles = []string{}
-			for _, change := range changes {
-				changedFiles = append(changedFiles, change.Filename)
-			}
-		}
-		return changedFiles, nil
+// validateContextOverlap ensures that there will be no overlap in contexts between a set of jobs running and a set to skip
+func validateContextOverlap(toRun, toSkip []config.Presubmit) error {
+	requestedContexts := sets.NewString()
+	for _, job := range toRun {
+		requestedContexts.Insert(job.Context)
 	}
+	skippedContexts := sets.NewString()
+	for _, job := range toSkip {
+		skippedContexts.Insert(job.Context)
+	}
+	if overlap := requestedContexts.Intersection(skippedContexts).List(); len(overlap) > 0 {
+		return fmt.Errorf("the following contexts are both triggered and skipped: %s", strings.Join(overlap, ", "))
+	}
+
+	return nil
 }
 
-func allContexts(parent config.Presubmit) []string {
-	contexts := []string{parent.Context}
-	for _, child := range parent.RunAfterSuccess {
-		contexts = append(contexts, allContexts(child)...)
-	}
-	return contexts
+// RunRequested executes the config.Presubmits that are requested
+func RunRequested(c Client, pr *github.PullRequest, baseSHA string, requestedJobs []config.Presubmit, eventGUID string) error {
+	return runRequested(c, pr, baseSHA, requestedJobs, eventGUID)
 }
 
-func runOrSkipRequested(c client, pr *github.PullRequest, requestedJobs []config.Presubmit, forceRunContexts map[string]bool, body, eventGUID string) error {
-	org := pr.Base.Repo.Owner.Login
-	repo := pr.Base.Repo.Name
-	number := pr.Number
-
-	baseSHA, err := c.GitHubClient.GetRef(org, repo, "heads/"+pr.Base.Ref)
-	if err != nil {
-		return err
-	}
-
-	// Use a closure to lazily retrieve the file changes only if they are needed.
-	// We only have to fetch the changes if there is at least one RunIfChanged
-	// job that is not being force run (due to a `/retest` after a failure or
-	// because it is explicitly triggered with `/test foo`).
-	getChanges := fileChangesGetter(c.GitHubClient, org, repo, number)
-	// shouldRun indicates if a job should actually run.
-	shouldRun := func(j config.Presubmit) (bool, error) {
-		if !j.RunsAgainstBranch(pr.Base.Ref) {
-			return false, nil
-		}
-		if j.RunIfChanged == "" || forceRunContexts[j.Context] || j.TriggerMatches(body) {
-			return true, nil
-		}
-		changes, err := getChanges()
-		if err != nil {
-			return false, err
-		}
-		return j.RunsAgainstChanges(changes), nil
-	}
-
-	// For each job determine if any sharded version of the job runs.
-	// This in turn determines which jobs to run and which contexts to mark as "Skipped".
-	//
-	// Note: Job sharding is achieved with presubmit configurations that overlap on
-	// name, but run under disjoint circumstances. For example, a job 'foo' can be
-	// sharded to have different pod specs for different branches by
-	// creating 2 presubmit configurations with the name foo, but different pod
-	// specs, and specifying different branches for each job.
-	var toRunJobs []config.Presubmit
-	toRun := sets.NewString()
-	toSkip := sets.NewString()
-	for _, job := range requestedJobs {
-		runs, err := shouldRun(job)
-		if err != nil {
-			return err
-		}
-		if runs {
-			toRunJobs = append(toRunJobs, job)
-			toRun.Insert(job.Context)
-		} else if !job.SkipReport {
-			// we need to post context statuses for all jobs; if a job is slated to
-			// run after the success of a parent job that is skipped, it must be
-			// skipped as well
-			toSkip.Insert(allContexts(job)...)
-		}
-	}
-	// 'Skip' any context that is requested, but doesn't have any job shards that
-	// will run.
-	for _, context := range toSkip.Difference(toRun).List() {
-		if err := c.GitHubClient.CreateStatus(org, repo, pr.Head.SHA, github.Status{
-			State:       github.StatusSuccess,
-			Context:     context,
-			Description: "Skipped",
-		}); err != nil {
-			return err
-		}
-	}
-
+func runRequested(c Client, pr *github.PullRequest, baseSHA string, requestedJobs []config.Presubmit, eventGUID string, millisecondOverride ...time.Duration) error {
 	var errors []error
-	for _, job := range toRunJobs {
+	for _, job := range requestedJobs {
 		c.Logger.Infof("Starting %s build.", job.Name)
 		pj := pjutil.NewPresubmit(*pr, baseSHA, job, eventGUID)
 		c.Logger.WithFields(pjutil.ProwJobFields(&pj)).Info("Creating a new prowjob.")
-		if _, err := c.KubeClient.CreateProwJob(pj); err != nil {
+		if err := createWithRetry(context.TODO(), c.ProwJobClient, &pj, millisecondOverride...); err != nil {
+			c.Logger.WithError(err).Error("Failed to create prowjob.")
 			errors = append(errors, err)
 		}
 	}
-	if len(errors) > 0 {
-		return fmt.Errorf("errors starting jobs: %v", errors)
+	return utilerrors.NewAggregate(errors)
+}
+
+func getPresubmits(log *logrus.Entry, gc git.ClientFactory, cfg *config.Config, orgRepo string, baseSHAGetter, headSHAGetter config.RefGetter) []config.Presubmit {
+	presubmits, err := cfg.GetPresubmits(gc, orgRepo, baseSHAGetter, headSHAGetter)
+	if err != nil {
+		// Fall back to static presubmits to avoid deadlocking when a presubmit is used to verify
+		// inrepoconfig. Tide will still respect errors here and not merge.
+		log.WithError(err).Debug("Failed to get presubmits")
+		presubmits = cfg.PresubmitsStatic[orgRepo]
 	}
+	return presubmits
+}
+
+func getPostsubmits(log *logrus.Entry, gc git.ClientFactory, cfg *config.Config, orgRepo string, baseSHAGetter config.RefGetter) []config.Postsubmit {
+	postsubmits, err := cfg.GetPostsubmits(gc, orgRepo, baseSHAGetter)
+	if err != nil {
+		// Fall back to static postsubmits, loading inrepoconfig returned an error.
+		log.WithError(err).Error("Failed to get postsubmits")
+		postsubmits = cfg.PostsubmitsStatic[orgRepo]
+	}
+	return postsubmits
+}
+
+// createWithRetry will retry the cration of a ProwJob. The Name must be set, otherwise we might end up creating it multiple times
+// if one Create request errors but succeeds under the hood.
+func createWithRetry(ctx context.Context, client prowJobClient, pj *prowapi.ProwJob, millisecondOverride ...time.Duration) error {
+	millisecond := time.Millisecond
+	if len(millisecondOverride) == 1 {
+		millisecond = millisecondOverride[0]
+	}
+
+	var errs []error
+	if err := wait.ExponentialBackoff(wait.Backoff{Duration: 250 * millisecond, Factor: 2.0, Jitter: 0.1, Steps: 8}, func() (bool, error) {
+		if _, err := client.Create(ctx, pj, metav1.CreateOptions{}); err != nil {
+			// Can happen if a previous request was successful but returned an error
+			if apierrors.IsAlreadyExists(err) {
+				return true, nil
+			}
+			// Store and swallow errors, if we end up timing out we will return all of them
+			errs = append(errs, err)
+			return false, nil
+		}
+		return true, nil
+	}); err != nil {
+		if err != wait.ErrWaitTimeout {
+			return err
+		}
+		return utilerrors.NewAggregate(errs)
+	}
+
 	return nil
 }

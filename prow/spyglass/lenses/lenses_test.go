@@ -19,10 +19,14 @@ package lenses
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io/ioutil"
 	"testing"
 
 	"github.com/sirupsen/logrus"
+
+	"k8s.io/test-infra/prow/config"
+	"k8s.io/test-infra/prow/spyglass/api"
 )
 
 type FakeArtifact struct {
@@ -82,23 +86,18 @@ func (fa *FakeArtifact) ReadAtMost(n int64) ([]byte, error) {
 
 type dumpLens struct{}
 
-func (dumpLens) Name() string {
-	return "dump"
+func (dumpLens) Config() LensConfig {
+	return LensConfig{
+		Name:  "dump",
+		Title: "Dump Lens",
+	}
 }
 
-func (dumpLens) Title() string {
-	return "Dump View"
-}
-
-func (dumpLens) Priority() int {
-	return 1
-}
-
-func (dumpLens) Header(artifacts []Artifact, resourceDir string) string {
+func (dumpLens) Header(artifacts []api.Artifact, resourceDir string, config json.RawMessage, spyglassConfig config.Spyglass) string {
 	return ""
 }
 
-func (dumpLens) Body(artifacts []Artifact, resourceDir, data string) string {
+func (dumpLens) Body(artifacts []api.Artifact, resourceDir string, data string, config json.RawMessage, spyglassConfig config.Spyglass) string {
 	var view []byte
 	for _, a := range artifacts {
 		data, err := a.ReadAll()
@@ -111,7 +110,7 @@ func (dumpLens) Body(artifacts []Artifact, resourceDir, data string) string {
 	return string(view)
 }
 
-func (dumpLens) Callback(artifacts []Artifact, resourceDir, data string) string {
+func (dumpLens) Callback(artifacts []api.Artifact, resourceDir string, data string, config json.RawMessage, spyglassConfig config.Spyglass) string {
 	return ""
 }
 
@@ -129,7 +128,7 @@ func TestView(t *testing.T) {
 	testCases := []struct {
 		name      string
 		lensName  string
-		artifacts []Artifact
+		artifacts []api.Artifact
 		raw       string
 		expected  string
 		err       error
@@ -137,7 +136,7 @@ func TestView(t *testing.T) {
 		{
 			name:     "simple view",
 			lensName: "dump",
-			artifacts: []Artifact{
+			artifacts: []api.Artifact{
 				fakeLog, fakeLog,
 			},
 			raw: "",
@@ -153,7 +152,7 @@ crazy`,
 		{
 			name:      "fail on unregistered view name",
 			lensName:  "MicroverseBattery",
-			artifacts: []Artifact{},
+			artifacts: []api.Artifact{},
 			raw:       "",
 			expected:  "",
 			err:       ErrInvalidLensName,
@@ -168,7 +167,7 @@ crazy`,
 		if tc.err == nil && lens == nil {
 			t.Fatalf("Expected lens %s but got nil.", tc.lensName)
 		}
-		if lens != nil && lens.Body(tc.artifacts, "", tc.raw) != tc.expected {
+		if lens != nil && lens.Body(tc.artifacts, "", tc.raw, nil, config.Spyglass{}) != tc.expected {
 			t.Errorf("%s expected view to be %s but got %s", tc.name, tc.expected, lens)
 		}
 	}
@@ -188,7 +187,7 @@ func TestLastNLines_GCS(t *testing.T) {
 		path     string
 		contents []byte
 		n        int64
-		a        Artifact
+		a        api.Artifact
 		expected []string
 	}{
 		{

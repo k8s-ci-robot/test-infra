@@ -1,0 +1,22 @@
+# See the OWNERS docs at https://go.k8s.io/owners
+
+reviewers:
+- andyzhangx
+- brendandburns
+- CecileRobertMichon
+- chewong
+- feiskyer
+- justaugustus
+- karataliu
+- khenidak
+approvers:
+- andyzhangx
+- brendandburns
+- chewong
+- feiskyer
+- justaugustus
+- karataliu
+- khenidak
+
+labels:
+- area/provider/azure

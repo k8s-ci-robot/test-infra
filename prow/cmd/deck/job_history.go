@@ -19,7 +19,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"net/url"
 	"path"
@@ -29,11 +31,14 @@ import (
 	"strings"
 	"time"
 
-	"cloud.google.com/go/storage"
 	"github.com/sirupsen/logrus"
-	"google.golang.org/api/iterator"
+
+	prowapi "k8s.io/test-infra/prow/apis/prowjobs/v1"
+	prowv1 "k8s.io/test-infra/prow/apis/prowjobs/v1"
 	"k8s.io/test-infra/prow/config"
-	"k8s.io/test-infra/prow/deck/jobs"
+	pkgio "k8s.io/test-infra/prow/io"
+	"k8s.io/test-infra/prow/io/providers"
+	"k8s.io/test-infra/prow/pod-utils/gcs"
 )
 
 const (
@@ -43,24 +48,51 @@ const (
 
 	// ** Job history assumes the GCS layout specified here:
 	// https://github.com/kubernetes/test-infra/tree/master/gubernator#gcs-bucket-layout
-	logsPrefix     = "logs"
-	symLinkPrefix  = "pr-logs/directory"
-	spyglassPrefix = "/view/gcs"
+	logsPrefix     = gcs.NonPRLogs
+	spyglassPrefix = "/view"
 	emptyID        = int64(-1) // indicates no build id was specified
 )
 
 var (
-	prefixRe = regexp.MustCompile("gs://.*?/")
-	linkRe   = regexp.MustCompile("/([0-9]+)\\.txt$")
+	linkRe = regexp.MustCompile(`/([0-9]+)\.txt$`)
 )
 
 type buildData struct {
 	index        int
+	jobName      string
+	prefix       string
 	SpyglassLink string
 	ID           string
 	Started      time.Time
 	Duration     time.Duration
 	Result       string
+	commitHash   string
+	Pull         *prowv1.Pull
+}
+
+// storageBucket is an abstraction for unit testing
+type storageBucket interface {
+	getName() string
+	getStorageProvider() string
+	listSubDirs(ctx context.Context, prefix string) ([]string, error)
+	listAll(ctx context.Context, prefix string) ([]string, error)
+	readObject(ctx context.Context, key string) ([]byte, error)
+}
+
+// blobStorageBucket is our real implementation of storageBucket.
+// Use `newBlobStorageBucket` to instantiate (includes bucket-level validation).
+type blobStorageBucket struct {
+	name            string
+	storageProvider string
+	pkgio.Opener
+}
+
+// newBlobStorageBucket validates the bucketName and returns a new instance of blobStorageBucket.
+func newBlobStorageBucket(bucketName, storageProvider string, config *config.Config, opener pkgio.Opener) (blobStorageBucket, error) {
+	if err := config.ValidateStorageBucket(bucketName); err != nil {
+		return blobStorageBucket{}, fmt.Errorf("could not instantiate storage bucket: %v", err)
+	}
+	return blobStorageBucket{bucketName, storageProvider, opener}, nil
 }
 
 type jobHistoryTemplate struct {
@@ -73,117 +105,129 @@ type jobHistoryTemplate struct {
 	Builds       []buildData
 }
 
-func readObject(obj *storage.ObjectHandle) ([]byte, error) {
-	rc, err := obj.NewReader(context.Background())
+func (bucket blobStorageBucket) readObject(ctx context.Context, key string) ([]byte, error) {
+	rc, err := bucket.Opener.Reader(ctx, fmt.Sprintf("%s://%s/%s", bucket.storageProvider, bucket.name, key))
 	if err != nil {
-		return []byte{}, fmt.Errorf("failed to get reader for GCS object: %v", err)
+		return nil, fmt.Errorf("creating reader for object %s: %w", key, err)
 	}
+	defer rc.Close()
 	return ioutil.ReadAll(rc)
 }
 
-func readLatestBuild(bkt *storage.BucketHandle, root string) (int64, error) {
-	path := path.Join(root, latestBuildFile)
-	data, err := readObject(bkt.Object(path))
+func (bucket blobStorageBucket) getName() string {
+	return bucket.name
+}
+
+func (bucket blobStorageBucket) getStorageProvider() string {
+	return bucket.storageProvider
+}
+
+func readLatestBuild(ctx context.Context, bucket storageBucket, root string) (int64, error) {
+	key := path.Join(root, latestBuildFile)
+	data, err := bucket.readObject(ctx, key)
 	if err != nil {
-		return -1, fmt.Errorf("failed to read %s: %v", path, err)
+		return -1, fmt.Errorf("failed to read %s: %w", key, err)
 	}
-	n, err := strconv.ParseInt(string(data), 10, 64)
+	n, err := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
 	if err != nil {
-		return -1, fmt.Errorf("failed to parse %s: %v", path, err)
+		return -1, fmt.Errorf("failed to parse %s: %v", key, err)
 	}
 	return n, nil
 }
 
-// resolve sym links into the actual log directory for a particular test run
-func resolveSymLink(bkt *storage.BucketHandle, symLink string) (string, error) {
-	data, err := readObject(bkt.Object(symLink))
+// resolve symlinks into the actual log directory for a particular test run, e.g.:
+// * input:  gs://prow-artifacts/pr-logs/pull/cluster-api-provider-openstack/1687/bazel-build/1248207834168954881
+// * output: pr-logs/pull/cluster-api-provider-openstack/1687/bazel-build/1248207834168954881
+func (bucket blobStorageBucket) resolveSymLink(ctx context.Context, symLink string) (string, error) {
+	data, err := bucket.readObject(ctx, symLink)
 	if err != nil {
-		return "", fmt.Errorf("failed to read %s: %v", symLink, err)
+		return "", fmt.Errorf("failed to read %s: %w", symLink, err)
 	}
 	// strip gs://<bucket-name> from global address `u`
-	u := string(data)
-	return prefixRe.ReplaceAllString(u, ""), nil
+	u := strings.TrimSpace(string(data))
+	parsedURL, err := url.Parse(u)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimPrefix(parsedURL.Path, "/"), nil
 }
 
-func spyglassLink(bkt *storage.BucketHandle, root, id string) (string, error) {
-	bAttrs, err := bkt.Attrs(context.Background())
-	if err != nil {
-		return "", fmt.Errorf("failed to get bucket name: %v", err)
-	}
-	bktName := bAttrs.Name
-	p, err := getPath(bkt, root, id, "")
+func (bucket blobStorageBucket) spyglassLink(ctx context.Context, root, id string) (string, error) {
+	p, err := bucket.getPath(ctx, root, id, "")
 	if err != nil {
 		return "", fmt.Errorf("failed to get path: %v", err)
 	}
-	return path.Join(spyglassPrefix, bktName, p), nil
+	return path.Join(spyglassPrefix, bucket.storageProvider, bucket.name, p), nil
 }
 
-func getPath(bkt *storage.BucketHandle, root, id, fname string) (string, error) {
+func (bucket blobStorageBucket) getPath(ctx context.Context, root, id, fname string) (string, error) {
 	if strings.HasPrefix(root, logsPrefix) {
 		return path.Join(root, id, fname), nil
 	}
 	symLink := path.Join(root, id+".txt")
-	dir, err := resolveSymLink(bkt, symLink)
+	dir, err := bucket.resolveSymLink(ctx, symLink)
 	if err != nil {
-		return "", fmt.Errorf("failed to resolve sym link: %v", err)
+		return "", fmt.Errorf("failed to resolve sym link: %w", err)
 	}
 	return path.Join(dir, fname), nil
 }
 
 // reads specified JSON file in to `data`
-func readJSON(bkt *storage.BucketHandle, root, id, fname string, data interface{}) error {
-	p, err := getPath(bkt, root, id, fname)
+func readJSON(ctx context.Context, bucket storageBucket, key string, data interface{}) error {
+	rawData, err := bucket.readObject(ctx, key)
 	if err != nil {
-		return fmt.Errorf("failed to get path: %v", err)
-	}
-	rawData, err := readObject(bkt.Object(p))
-	if err != nil {
-		return fmt.Errorf("failed to read %s for build %s: %v", fname, id, err)
+		return fmt.Errorf("failed to read %s: %v", key, err)
 	}
 	err = json.Unmarshal(rawData, &data)
 	if err != nil {
-		return fmt.Errorf("failed to parse %s for build %s: %v", fname, id, err)
+		return fmt.Errorf("failed to parse %s: %v", key, err)
 	}
 	return nil
 }
 
-// Lists the GCS "directory paths" immediately under prefix.
-func listSubDirs(bkt *storage.BucketHandle, prefix string) ([]string, error) {
+// Lists the "directory paths" immediately under prefix.
+func (bucket blobStorageBucket) listSubDirs(ctx context.Context, prefix string) ([]string, error) {
 	if !strings.HasSuffix(prefix, "/") {
 		prefix += "/"
 	}
+	it, err := bucket.Opener.Iterator(ctx, fmt.Sprintf("%s://%s/%s", bucket.storageProvider, bucket.name, prefix), "/")
+	if err != nil {
+		return nil, err
+	}
+
 	dirs := []string{}
-	it := bkt.Objects(context.Background(), &storage.Query{
-		Prefix:    prefix,
-		Delimiter: "/",
-	})
 	for {
-		attrs, err := it.Next()
-		if err == iterator.Done {
-			break
-		}
+		attrs, err := it.Next(ctx)
 		if err != nil {
+			if err == io.EOF {
+				break
+			}
 			return dirs, err
 		}
-		if attrs.Prefix != "" {
-			dirs = append(dirs, attrs.Prefix)
+		if attrs.IsDir {
+			dirs = append(dirs, attrs.Name)
 		}
 	}
 	return dirs, nil
 }
 
-// Lists all GCS keys with given prefix.
-func listAll(bkt *storage.BucketHandle, prefix string) ([]string, error) {
+// Lists all keys with given prefix.
+func (bucket blobStorageBucket) listAll(ctx context.Context, prefix string) ([]string, error) {
+	if !strings.HasSuffix(prefix, "/") {
+		prefix = prefix + "/"
+	}
+	it, err := bucket.Opener.Iterator(ctx, fmt.Sprintf("%s://%s/%s", bucket.storageProvider, bucket.name, prefix), "")
+	if err != nil {
+		return nil, err
+	}
+
 	keys := []string{}
-	it := bkt.Objects(context.Background(), &storage.Query{
-		Prefix: prefix,
-	})
 	for {
-		attrs, err := it.Next()
-		if err == iterator.Done {
-			break
-		}
+		attrs, err := it.Next(ctx)
 		if err != nil {
+			if err == io.EOF {
+				break
+			}
 			return keys, err
 		}
 		keys = append(keys, attrs.Name)
@@ -192,26 +236,24 @@ func listAll(bkt *storage.BucketHandle, prefix string) ([]string, error) {
 }
 
 // Gets all build ids for a job.
-func listBuildIDs(bkt *storage.BucketHandle, root string) ([]int64, error) {
-	ids := []int64{}
+func (bucket blobStorageBucket) listBuildIDs(ctx context.Context, root string) ([]int64, error) {
+	var ids []int64
 	if strings.HasPrefix(root, logsPrefix) {
-		dirs, err := listSubDirs(bkt, root)
-		if err != nil {
-			return ids, fmt.Errorf("failed to list GCS directories: %v", err)
-		}
+		dirs, listErr := bucket.listSubDirs(ctx, root)
 		for _, dir := range dirs {
-			i, err := strconv.ParseInt(path.Base(dir), 10, 64)
+			leaf := path.Base(dir)
+			i, err := strconv.ParseInt(leaf, 10, 64)
 			if err == nil {
 				ids = append(ids, i)
 			} else {
-				logrus.Warningf("unrecognized directory name (expected int64): %s", dir)
+				logrus.WithField("gcs-path", dir).Warningf("unrecognized directory name (expected int64): %s", leaf)
 			}
 		}
-	} else {
-		keys, err := listAll(bkt, root)
-		if err != nil {
-			return ids, fmt.Errorf("failed to list GCS keys: %v", err)
+		if listErr != nil {
+			return ids, fmt.Errorf("failed to list directories: %w", listErr)
 		}
+	} else {
+		keys, listErr := bucket.listAll(ctx, root)
 		for _, key := range keys {
 			matches := linkRe.FindStringSubmatch(key)
 			if len(matches) == 2 {
@@ -223,38 +265,68 @@ func listBuildIDs(bkt *storage.BucketHandle, root string) ([]int64, error) {
 				}
 			}
 		}
+		if listErr != nil {
+			return ids, fmt.Errorf("failed to list keys: %w", listErr)
+		}
 	}
 	return ids, nil
 }
 
-func jobHistURL(url *url.URL) (string, string, int64, error) {
+// parseJobHistURL parses the job History URL
+// example urls:
+// * new format: https://prow.k8s.io/job-history/gs/kubernetes-jenkins/pr-logs/directory/pull-capi?buildId=1245584383100850177
+// * old format: https://prow.k8s.io/job-history/kubernetes-jenkins/pr-logs/directory/pull-capi?buildId=1245584383100850177
+// Newly generated URLs will include the storageProvider. We still support old URLs so they don't break.
+// For old URLs we assume that the storageProvider is `gs`.
+// examples return values:
+// * storageProvider: gs, s3
+// * bucketName: kubernetes-jenkins
+// * root: pr-logs/directory/pull-capi
+// * buildID: 1245584383100850177
+func parseJobHistURL(url *url.URL) (storageProvider, bucketName, root string, buildID int64, err error) {
+	buildID = emptyID
 	p := strings.TrimPrefix(url.Path, "/job-history/")
-	s := strings.SplitN(p, "/", 2)
-	if len(s) < 2 {
-		return "", "", emptyID, fmt.Errorf("invalid path (expected /job-history/<gcs-path>): %v", url.Path)
+	// examples for p:
+	// * new format: gs/kubernetes-jenkins/pr-logs/directory/pull-cluster-api-provider-openstack-test
+	// * old format: kubernetes-jenkins/pr-logs/directory/pull-cluster-api-provider-openstack-test
+
+	// inject gs/ if old format is used
+	if !providers.HasStorageProviderPrefix(p) {
+		p = fmt.Sprintf("%s/%s", providers.GS, p)
 	}
-	bucketName := s[0]
-	root := s[1]
+
+	// handle new format
+	s := strings.SplitN(p, "/", 3)
+	if len(s) < 3 {
+		err = fmt.Errorf("invalid path (expected either /job-history/<gcs-path> or /job-history/<storage-type>/<storage-path>): %v", url.Path)
+		return
+	}
+	storageProvider = s[0]
+	bucketName = s[1]
+	root = s[2] // `root` is the root "directory" prefix for this job's results
+
 	if bucketName == "" {
-		return bucketName, root, emptyID, fmt.Errorf("missing GCS bucket name: %v", url.Path)
+		err = fmt.Errorf("missing bucket name: %v", url.Path)
+		return
 	}
 	if root == "" {
-		return bucketName, root, emptyID, fmt.Errorf("invalid GCS path for job: %v", url.Path)
+		err = fmt.Errorf("invalid path for job: %v", url.Path)
+		return
 	}
 
-	buildID := emptyID
 	if idVals := url.Query()[idParam]; len(idVals) >= 1 && idVals[0] != "" {
-		var err error
 		buildID, err = strconv.ParseInt(idVals[0], 10, 64)
 		if err != nil {
-			return bucketName, root, buildID, fmt.Errorf("invalid value for %s: %v", idParam, err)
+			err = fmt.Errorf("invalid value for %s: %v", idParam, err)
+			return
 		}
 		if buildID < 0 {
-			return bucketName, root, buildID, fmt.Errorf("invalid value %s = %d", idParam, buildID)
+			err = fmt.Errorf("invalid value %s = %d", idParam, buildID)
+			return
 		}
 	}
 
-	return bucketName, root, buildID, nil
+	return
 }
 
 func linkID(url *url.URL, id int64) string {
@@ -269,31 +341,55 @@ func linkID(url *url.URL, id int64) string {
 	return u.String()
 }
 
-func getBuildData(bkt *storage.BucketHandle, root string, buildID int64, index int) (buildData, error) {
+func getBuildData(ctx context.Context, bucket storageBucket, dir string) (buildData, error) {
 	b := buildData{
-		index:  index,
-		ID:     strconv.FormatInt(buildID, 10),
-		Result: "Unknown",
+		Result:     "Unknown",
+		commitHash: "Unknown",
 	}
-	link, err := spyglassLink(bkt, root, b.ID)
+	started := gcs.Started{}
+	err := readJSON(ctx, bucket, path.Join(dir, prowv1.StartedStatusFile), &started)
 	if err != nil {
-		return b, fmt.Errorf("failed to get spyglass link: %v", err)
+		return b, fmt.Errorf("failed to read started.json: %v", err)
 	}
-	b.SpyglassLink = link
-	started := jobs.Started{}
-	err = readJSON(bkt, root, b.ID, "started.json", &started)
-	if err != nil {
-		return b, fmt.Errorf("failed to get job metadata: %v", err)
-	}
-	b.Result = "Unfinished"
 	b.Started = time.Unix(started.Timestamp, 0)
-	finished := jobs.Finished{}
-	err = readJSON(bkt, root, b.ID, "finished.json", &finished)
+	finished := gcs.Finished{}
+	err = readJSON(ctx, bucket, path.Join(dir, prowv1.FinishedStatusFile), &finished)
 	if err != nil {
-		logrus.Warningf("failed to read finished.json (job might be unfinished): %v", err)
+		b.Result = "Pending"
+		for _, ref := range started.Repos {
+			if strings.Contains(ref, ","+started.Pull+":") {
+				started.Pull = ref
+				break
+			}
+		}
+		logrus.Debugf("failed to read finished.json (job might be unfinished): %v", err)
 	}
-	if finished.Timestamp != 0 {
-		b.Duration = time.Unix(finished.Timestamp, 0).Sub(b.Started)
+
+	pj := prowapi.ProwJob{}
+	err = readJSON(ctx, bucket, path.Join(dir, prowv1.ProwJobFile), &pj)
+	if err != nil {
+		logrus.WithError(err).Debugf("failed to read %s", prowv1.ProwJobFile)
+	} else {
+		if pj.Spec.Refs != nil && len(pj.Spec.Refs.Pulls) > 0 {
+			b.Pull = &pj.Spec.Refs.Pulls[0]
+		}
+	}
+
+	if commitHash, err := getPullCommitHash(started.Pull); err == nil {
+		b.commitHash = commitHash
+	}
+
+	// Testgrid metadata.Finished is deprecating the Revision field, however
+	// the actual finished.json is still using revision and maps to DeprecatedRevision.
+	// TODO(ttyang): update both to match when fejta completely removes DeprecatedRevision.
+	if finished.DeprecatedRevision != "" {
+		b.commitHash = finished.DeprecatedRevision
+	}
+
+	if finished.Timestamp != nil {
+		b.Duration = time.Unix(*finished.Timestamp, 0).Sub(b.Started)
+	} else {
+		b.Duration = time.Since(b.Started).Round(time.Second)
 	}
 	if finished.Result != "" {
 		b.Result = finished.Result
@@ -329,19 +425,21 @@ func (a int64slice) Len() int           { return len(a) }
 func (a int64slice) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a int64slice) Less(i, j int) bool { return a[i] < a[j] }
 
-// Gets job history from the GCS bucket specified in config.
-func getJobHistory(url *url.URL, config *config.Config, gcsClient *storage.Client) (jobHistoryTemplate, error) {
+// Gets job history from the bucket specified in config.
+func getJobHistory(ctx context.Context, url *url.URL, cfg config.Getter, opener pkgio.Opener) (jobHistoryTemplate, error) {
 	start := time.Now()
 	tmpl := jobHistoryTemplate{}
 
-	bucketName, root, top, err := jobHistURL(url)
+	storageProvider, bucketName, root, top, err := parseJobHistURL(url)
 	if err != nil {
 		return tmpl, fmt.Errorf("invalid url %s: %v", url.String(), err)
 	}
+	bucket, err := newBlobStorageBucket(bucketName, storageProvider, cfg(), opener)
+	if err != nil {
+		return tmpl, err
+	}
 	tmpl.Name = root
-	bkt := gcsClient.Bucket(bucketName)
-
-	latest, err := readLatestBuild(bkt, root)
+	latest, err := readLatestBuild(ctx, bucket, root)
 	if err != nil {
 		return tmpl, fmt.Errorf("failed to locate build data: %v", err)
 	}
@@ -352,13 +450,19 @@ func getJobHistory(url *url.URL, config *config.Config, gcsClient *storage.Clien
 		tmpl.LatestLink = linkID(url, emptyID)
 	}
 
-	buildIDs, err := listBuildIDs(bkt, root)
-	if err != nil {
+	// Don't spend an unbound amount of time finding a potentially huge history
+	buildIDListCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	buildIDs, err := bucket.listBuildIDs(buildIDListCtx, root)
+	if err != nil && !errors.Is(err, context.DeadlineExceeded) {
 		return tmpl, fmt.Errorf("failed to get build ids: %v", err)
 	}
 	sort.Sort(sort.Reverse(int64slice(buildIDs)))
 
+	// determine which results to display on this page
 	shownIDs, firstIndex, lastIndex := cropResults(buildIDs, top)
+
+	// get links to the neighboring pages
 	if firstIndex > 0 {
 		nextIndex := firstIndex - resultsPerPage
 		// here emptyID indicates the most recent build, which will not necessarily be buildIDs[0]
@@ -376,14 +480,30 @@ func getJobHistory(url *url.URL, config *config.Config, gcsClient *storage.Clien
 	tmpl.ResultsShown = len(shownIDs)
 	tmpl.ResultsTotal = len(buildIDs)
 
+	// concurrently fetch data for all of the builds to be shown
 	bch := make(chan buildData)
 	for i, buildID := range shownIDs {
 		go func(i int, buildID int64) {
-			bd, err := getBuildData(bkt, root, buildID, i)
+			id := strconv.FormatInt(buildID, 10)
+			dir, err := bucket.getPath(ctx, root, id, "")
+			if err != nil {
+				if !pkgio.IsNotExist(err) {
+					logrus.WithError(err).Error("Failed to get path")
+				}
+				bch <- buildData{}
+				return
+			}
+			b, err := getBuildData(ctx, bucket, dir)
 			if err != nil {
 				logrus.Warningf("build %d information incomplete: %v", buildID, err)
 			}
-			bch <- bd
+			b.index = i
+			b.ID = id
+			b.SpyglassLink, err = bucket.spyglassLink(ctx, root, id)
+			if err != nil {
+				logrus.Errorf("failed to get spyglass link: %v", err)
+			}
+			bch <- b
 		}(i, buildID)
 	}
 	for i := 0; i < len(shownIDs); i++ {
@@ -391,7 +511,7 @@ func getJobHistory(url *url.URL, config *config.Config, gcsClient *storage.Clien
 		tmpl.Builds[b.index] = b
 	}
 
-	elapsed := time.Now().Sub(start)
+	elapsed := time.Since(start)
 	logrus.Infof("loaded %s in %v", url.Path, elapsed)
 	return tmpl, nil
 }

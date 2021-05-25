@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Refresh retries Github status updates for stale PR statuses.
+// Refresh retries GitHub status updates for stale PR statuses.
 package main
 
 import (
@@ -23,25 +23,29 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/signal"
 	"strconv"
-	"syscall"
+	"time"
 
 	"github.com/sirupsen/logrus"
+	"k8s.io/test-infra/prow/interrupts"
+	"k8s.io/test-infra/prow/logrusutil"
+	"k8s.io/test-infra/prow/pjutil"
 
 	"k8s.io/test-infra/pkg/flagutil"
-	"k8s.io/test-infra/prow/config"
+	"k8s.io/test-infra/prow/config/secret"
 	prowflagutil "k8s.io/test-infra/prow/flagutil"
+	configflagutil "k8s.io/test-infra/prow/flagutil/config"
 	"k8s.io/test-infra/prow/pluginhelp/externalplugins"
 )
 
 type options struct {
 	port int
 
-	configPath string
-	dryRun     bool
-	github     prowflagutil.GitHubOptions
-	prowURL    string
+	config                 configflagutil.ConfigOptions
+	dryRun                 bool
+	github                 prowflagutil.GitHubOptions
+	instrumentationOptions prowflagutil.InstrumentationOptions
+	prowURL                string
 
 	webhookSecretFile string
 }
@@ -61,14 +65,13 @@ func (o *options) Validate() error {
 }
 
 func gatherOptions() options {
-	o := options{}
+	o := options{config: configflagutil.ConfigOptions{ConfigPath: "/etc/config/config.yaml"}}
 	fs := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
 	fs.IntVar(&o.port, "port", 8888, "Port to listen on.")
-	fs.StringVar(&o.configPath, "config-path", "/etc/config/config.yaml", "Path to config.yaml.")
 	fs.BoolVar(&o.dryRun, "dry-run", true, "Dry run for testing. Uses API tokens but does not mutate.")
 	fs.StringVar(&o.webhookSecretFile, "hmac-secret-file", "/etc/webhook/hmac", "Path to the file containing the GitHub HMAC secret.")
 	fs.StringVar(&o.prowURL, "prow-url", "", "Prow frontend URL.")
-	for _, group := range []flagutil.OptionGroup{&o.github} {
+	for _, group := range []flagutil.OptionGroup{&o.github, &o.instrumentationOptions, &o.config} {
 		group.AddFlags(fs)
 	}
 	fs.Parse(os.Args[1:])
@@ -81,22 +84,15 @@ func main() {
 		logrus.Fatalf("Invalid options: %v", err)
 	}
 
-	logrus.SetFormatter(&logrus.JSONFormatter{})
-	// TODO: Use global option from the prow config.
-	logrus.SetLevel(logrus.DebugLevel)
-	log := logrus.StandardLogger().WithField("plugin", "refresh")
+	logrusutil.ComponentInit()
+	log := logrus.StandardLogger().WithField("plugin", pluginName)
 
-	// Ignore SIGTERM so that we don't drop hooks when the pod is removed.
-	// We'll get SIGTERM first and then SIGKILL after our graceful termination
-	// deadline.
-	signal.Ignore(syscall.SIGTERM)
-
-	configAgent := &config.Agent{}
-	if err := configAgent.Start(o.configPath, ""); err != nil {
+	configAgent, err := o.config.ConfigAgent()
+	if err != nil {
 		log.WithError(err).Fatal("Error starting config agent.")
 	}
 
-	secretAgent := &config.SecretAgent{}
+	secretAgent := &secret.Agent{}
 	if err := secretAgent.Start([]string{o.github.TokenPath, o.webhookSecretFile}); err != nil {
 		logrus.WithError(err).Fatal("Error starting secrets agent.")
 	}
@@ -114,7 +110,13 @@ func main() {
 		log:            log,
 	}
 
-	http.Handle("/", serv)
-	externalplugins.ServeExternalPluginHelp(http.DefaultServeMux, log, helpProvider)
-	log.Fatal(http.ListenAndServe(":"+strconv.Itoa(o.port), nil))
+	health := pjutil.NewHealthOnPort(o.instrumentationOptions.HealthPort)
+	health.ServeReady()
+
+	mux := http.NewServeMux()
+	mux.Handle("/", serv)
+	externalplugins.ServeExternalPluginHelp(mux, log, helpProvider)
+	httpServer := &http.Server{Addr: ":" + strconv.Itoa(o.port), Handler: mux}
+	defer interrupts.WaitForGracefulShutdown()
+	interrupts.ListenAndServe(httpServer, 5*time.Second)
 }

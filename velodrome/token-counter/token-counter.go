@@ -51,11 +51,11 @@ type TokenHandler struct {
 	login    string
 }
 
-// GetGithubClient creates a client for each token
-func GetGithubClient(token string) *github.Client {
+// GetGitHubClient creates a client for each token
+func GetGitHubClient(token string) *github.Client {
 	return github.NewClient(
 		oauth2.NewClient(
-			oauth2.NoContext,
+			context.Background(),
 			oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token}),
 		),
 	)
@@ -80,7 +80,7 @@ func CreateTokenHandler(tokenStream io.Reader, influxdb *InfluxDB) (*TokenHandle
 	if err != nil {
 		return nil, err
 	}
-	client := GetGithubClient(strings.TrimSpace(string(token)))
+	client := GetGitHubClient(strings.TrimSpace(string(token)))
 	login, err := GetUsername(client) // Get user name for token
 	if err != nil {
 		return nil, err
@@ -129,14 +129,14 @@ func (t TokenHandler) Process() {
 	}
 
 	for {
-		halfPeriod := lastRate.Reset.Time.Sub(time.Now()) / 2
+		halfPeriod := time.Until(lastRate.Reset.Time) / 2
 		time.Sleep(halfPeriod)
 		newRate, err := t.getCoreRate()
 		if err != nil {
 			glog.Error("Failed to get CoreRate: ", err)
 			continue
 		}
-		// There is a bug in Github. They seem to reset the Remaining value before resetting the Reset value.
+		// There is a bug in GitHub. They seem to reset the Remaining value before resetting the Reset value.
 		if !newRate.Reset.Time.Equal(lastRate.Reset.Time) || newRate.Remaining > lastRate.Remaining {
 			if err := t.influxdb.Push(
 				"github_token_count",

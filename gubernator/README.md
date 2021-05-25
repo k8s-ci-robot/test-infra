@@ -1,3 +1,5 @@
+# [Gubernator](//gubernator.k8s.io/)
+
 Gubernator is a frontend for displaying Kubernetes test results stored in GCS.
 
 It runs on Google App Engine, and parses JSON and junit.xml results for display.
@@ -23,13 +25,13 @@ only updates after the webhook is added will be shown on the dashboard.
 # Development
 
 - Install the Google Cloud SDK: https://cloud.google.com/sdk/
-- Run locally using `dev_appserver.py` and visit http://localhost:8080
+- Run locally using `dev_appserver.py app.yaml` and visit http://localhost:8080
 - Test and lint using `./test-gubernator.sh`
 - Deploy with `make deploy` followed by `make migrate`
 
 # Deployment
 
-- Visit /config on the new deployment to configure Github [OAuth logins](https://github.com/settings/applications)
+- Visit /config on the new deployment to configure GitHub [OAuth logins](https://github.com/settings/applications)
   and webhook secrets.
 
 # GCS Layout
@@ -41,13 +43,13 @@ are laid out in a specific manner relative to each other.
 ## Job Artifact GCS Layout
 
 Every run should upload `started.json`, `finished.json`, and `build-log.txt`, and
-can optionally upload jUnit XML and/or other files to the `artifacts/` directory.
+can optionally upload JUnit XML and/or other files to the `artifacts/` directory.
 For a single build of a job, Gubernator expects the following layout in GCS:
 
 ```
 .
 ├── artifacts         # all artifacts must be placed under this directory
-│   └── junit_00.xml  # jUnit XML reports from the build
+│   └── junit_00.xml  # JUnit XML reports from the build
 ├── build-log.txt     # std{out,err} from the build
 ├── finished.json     # metadata uploaded once the build finishes
 └── started.json      # metadata uploaded once the build starts
@@ -75,7 +77,7 @@ The following fields in `finished.json` are honored:
 }
 ```
 
-Any artifacts from the build should be placed under `./artifacts/`. Any jUnit
+Any artifacts from the build should be placed under `./artifacts/`. Any JUnit
 XML reports should be named `junit_*.xml` and placed under `./artifacts` as well.
 
 ## Test Properties [Optional]
@@ -90,14 +92,8 @@ The properties can be defined as:
 ```xml
 <testcase ...>
   <properties>
-    <property>
-        <name>key1</name>
-        <value>value1</value>
-    </property>
-    <property>
-        <name>key2</name>
-        <value>value2</value>
-    </property>
+    <property name="key1" value="value1"></property>
+    <property name="key2" value="value2"></property>
   </properties>
 </testcase>
 ```
@@ -131,5 +127,5 @@ the different types of jobs:
 
 # Migrations
 
-1. 2018-01-09: Github webhook and oauth secrets must be reconfigured. Visit
+1. 2018-01-09: GitHub webhook and oauth secrets must be reconfigured. Visit
    /config on your deployment to enter the new values.

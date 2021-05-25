@@ -17,7 +17,7 @@
   <table id="history-table" class="mdl-data-table mdl-js-data-table mdl-shadow--2dp" style="max-width: 1000px">
     <thead>
     <tr>
-      <th class="mdl-data-table__cell--non-numeric">Build ID</th>
+      <th class="mdl-data-table__cell--non-numeric">Build</th>
       <th class="mdl-data-table__cell--non-numeric">Started</th>
       <th class="mdl-data-table__cell--non-numeric">Duration</th>
       <th class="mdl-data-table__cell--non-numeric">Result</th>
@@ -29,6 +29,7 @@
         <td class="mdl-data-table__cell--non-numeric">
           {{if .SpyglassLink}}<a href="{{.SpyglassLink}}">{{.ID}}</a>
           {{else}}{{.ID}}{{end}}
+          {{if .Pull}}(#<a href={{.Pull.Link}}>{{.Pull.Number}}</a> by <a href={{.Pull.AuthorLink}}>{{.Pull.Author}}){{end}}
         </td>
         <td class="mdl-data-table__cell--non-numeric">{{.Started}}</td>
         <td class="mdl-data-table__cell--non-numeric">{{.Duration}}</td>
@@ -39,14 +40,14 @@
   </table>
   <table style="max-width: 1000px">
     <tr>
-      {{if .LatestLink}}
-      <td><a href="{{.LatestLink}}">Latest Runs</a></td>
+      {{if .OlderLink}}
+      <td><a href="{{.OlderLink}}">&lt;- Older Runs</a></td>
       {{end}}
       {{if .NewerLink}}
-      <td><a href="{{.NewerLink}}">&lt;- Newer Runs</a></td>
+      <td><a href="{{.NewerLink}}">Newer Runs -&gt;</a></td>
       {{end}}
-      {{if .OlderLink}}
-      <td><a href="{{.OlderLink}}">Older Runs -&gt;</a></td>
+      {{if .LatestLink}}
+      <td><a href="{{.LatestLink}}">Latest Runs</a></td>
       {{end}}
       <td></td>
     </tr>
@@ -56,4 +57,4 @@
 <p>Showing {{.ResultsShown}}/{{.ResultsTotal}} results</p>
 {{end}}
 
-{{template "page" (settings mobileUnfriendly "job-history" .)}}
+{{template "page" (settings mobileUnfriendly lightMode "job-history" .)}}

@@ -1,8 +1,9 @@
+# See the OWNERS docs at https://go.k8s.io/owners
+
 approvers:
-- calebamiles
-- castrojo
+- alisondy
 - cblecker
-- grodrigues3
-- idvoretskyi
-- jdumars
-- parispittman
+- mrbobbytables
+- nikhita
+labels:
+- sig/contributor-experience

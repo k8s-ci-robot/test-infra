@@ -34,7 +34,6 @@ var initialFiles = map[string][]byte{
 var pullFiles = map[string][]byte{
 	"BUILD": []byte(`package(default_visibility = ["//visibility:public"])
 
-
 docker_build(
     name = "blah",
 )
@@ -44,7 +43,7 @@ docker_build(
 foo_repositories()
 `),
 	"blah.bzl": []byte(`def foo():
-  print("bar")
+  print("bar")  # should have four spaces
 `),
 }
 
@@ -92,7 +91,15 @@ var e = &github.GenericCommentEvent{
 }
 
 func TestBuildify(t *testing.T) {
-	lg, c, err := localgit.New()
+	testBuildify(localgit.New, t)
+}
+
+func TestBuildifyV2(t *testing.T) {
+	testBuildify(localgit.NewV2, t)
+}
+
+func testBuildify(clients localgit.Clients, t *testing.T) {
+	lg, c, err := clients()
 	if err != nil {
 		t.Fatalf("Making localgit: %v", err)
 	}
@@ -147,7 +154,15 @@ func TestBuildify(t *testing.T) {
 }
 
 func TestModifiedBazelFiles(t *testing.T) {
-	lg, c, err := localgit.New()
+	testModifiedBazelFiles(localgit.New, t)
+}
+
+func TestModifiedBazelFilesV2(t *testing.T) {
+	testModifiedBazelFiles(localgit.NewV2, t)
+}
+
+func testModifiedBazelFiles(clients localgit.Clients, t *testing.T) {
+	lg, c, err := clients()
 	if err != nil {
 		t.Fatalf("Making localgit: %v", err)
 	}

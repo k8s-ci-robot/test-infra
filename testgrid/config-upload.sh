@@ -16,11 +16,23 @@
 set -o errexit
 set -o nounset
 set -o pipefail
-set -o xtrace
 
-for output in gs://k8s-testgrid-canary/config gs://k8s-testgrid/config; do
-  bazel run //testgrid/cmd/configurator -- \
-    --yaml="$(realpath "$(dirname "${BASH_SOURCE}")"/config.yaml)" \
-    --output="${output}" \
-    --oneshot
+TESTINFRA_ROOT=$(git rev-parse --show-toplevel)
+
+for output in gs://k8s-testgrid-canary/configs/k8s/config gs://k8s-testgrid/configs/k8s/config; do
+  dir="$(dirname "${BASH_SOURCE}")"
+  (
+    set -o xtrace
+    bazel run //testgrid/cmd/configurator -- \
+      --yaml="${TESTINFRA_ROOT}/config/testgrids" \
+      --default="${TESTINFRA_ROOT}/config/testgrids/default.yaml" \
+      --prow-config="${TESTINFRA_ROOT}/config/prow/config.yaml" \
+      --prow-job-config="${TESTINFRA_ROOT}/config/jobs/" \
+      --output="${output}" \
+      --prowjob-url-prefix="https://git.k8s.io/test-infra/config/jobs/" \
+      --update-description \
+      --oneshot \
+      --world-readable \
+      "$@"
+  )
 done

@@ -17,6 +17,7 @@ limitations under the License.
 package entrypoint
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -30,15 +31,28 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
+
+	utilerrors "k8s.io/apimachinery/pkg/util/errors"
+	"k8s.io/test-infra/prow/pod-utils/wrapper"
 )
 
 const (
+	// internalCode is greater than 256 to signify entrypoint
+	// chose the code rather than the command it ran
+	// http://tldp.org/LDP/abs/html/exitcodes.html
+	//
+	// TODO(fejta): consider making all entrypoint-chosen codes internal
+	internalCode = 1000
 	// InternalErrorCode is what we write to the marker file to
 	// indicate that we failed to start the wrapped command
 	InternalErrorCode = 127
 	// AbortedErrorCode is what we write to the marker file to
 	// indicate that we were terminated via a signal.
 	AbortedErrorCode = 130
+
+	// PreviousErrorCode indicates a previous step failed so we
+	// did not run this step.
+	PreviousErrorCode = internalCode + AbortedErrorCode
 
 	// DefaultTimeout is the default timeout for the test
 	// process before SIGINT is sent
@@ -65,9 +79,12 @@ func (o Options) Run() int {
 	if err != nil {
 		logrus.WithError(err).Error("Error executing test process")
 	}
-	if err := o.mark(code); err != nil {
+	if err := o.Mark(code); err != nil {
 		logrus.WithError(err).Error("Error writing exit code to marker file")
-		return InternalErrorCode
+		return InternalErrorCode // we need to mark the real error code to safely return AlwaysZero
+	}
+	if o.AlwaysZero {
+		return 0
 	}
 	return code
 }
@@ -90,6 +107,33 @@ func (o Options) ExecuteProcess() (int, error) {
 	logrus.SetOutput(output)
 	defer logrus.SetOutput(os.Stdout)
 
+	// if we get asked to terminate we need to forward
+	// that to the wrapped process as if it timed out
+	interrupt := make(chan os.Signal, 1)
+	signal.Notify(interrupt, os.Interrupt, syscall.SIGTERM)
+
+	if o.PreviousMarker != "" {
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() {
+			select {
+			case s := <-interrupt:
+				logrus.Errorf("Received interrupt %s, cancelling...", s)
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+		prevMarkerResult := wrapper.WaitForMarkers(ctx, o.PreviousMarker)[o.PreviousMarker]
+		code, err := prevMarkerResult.ReturnCode, prevMarkerResult.Err
+		cancel() // end previous go-routine when not interrupted
+		if err != nil {
+			return InternalErrorCode, fmt.Errorf("wait for previous marker %s: %v", o.PreviousMarker, err)
+		}
+		if code != 0 {
+			logrus.Infof("Skipping as previous step exited %d", code)
+			return PreviousErrorCode, nil
+		}
+	}
+
 	executable := o.Args[0]
 	var arguments []string
 	if len(o.Args) > 1 {
@@ -99,13 +143,12 @@ func (o Options) ExecuteProcess() (int, error) {
 	command.Stderr = output
 	command.Stdout = output
 	if err := command.Start(); err != nil {
-		return InternalErrorCode, fmt.Errorf("could not start the process: %v", err)
+		errs := []error{fmt.Errorf("could not start the process: %v", err)}
+		if _, err := processLogFile.Write([]byte(errs[0].Error())); err != nil {
+			errs = append(errs, err)
+		}
+		return InternalErrorCode, utilerrors.NewAggregate(errs)
 	}
-
-	// if we get asked to terminate we need to forward
-	// that to the wrapped process as if it timed out
-	interrupt := make(chan os.Signal, 1)
-	signal.Notify(interrupt, os.Interrupt, syscall.SIGTERM)
 
 	timeout := optionOrDefault(o.Timeout, DefaultTimeout)
 	gracePeriod := optionOrDefault(o.GracePeriod, DefaultGracePeriod)
@@ -121,12 +164,12 @@ func (o Options) ExecuteProcess() (int, error) {
 	case <-time.After(timeout):
 		logrus.Errorf("Process did not finish before %s timeout", timeout)
 		cancelled = true
-		gracefullyTerminate(command, done, gracePeriod)
+		gracefullyTerminate(command, done, gracePeriod, nil)
 	case s := <-interrupt:
 		logrus.Errorf("Entrypoint received interrupt: %v", s)
 		cancelled = true
 		aborted = true
-		gracefullyTerminate(command, done, gracePeriod)
+		gracefullyTerminate(command, done, gracePeriod, &s)
 	}
 
 	var returnCode int
@@ -154,14 +197,18 @@ func (o Options) ExecuteProcess() (int, error) {
 	return returnCode, commandErr
 }
 
-func (o *Options) mark(exitCode int) error {
+func (o *Options) Mark(exitCode int) error {
 	content := []byte(strconv.Itoa(exitCode))
 
 	// create temp file in the same directory as the desired marker file
 	dir := filepath.Dir(o.MarkerFile)
-	tempFile, err := ioutil.TempFile(dir, "temp-marker")
+	tmpDir, err := ioutil.TempDir(dir, o.ContainerName)
 	if err != nil {
-		return fmt.Errorf("could not create temp marker file in %s: %v", dir, err)
+		return fmt.Errorf("%s: error creating temp dir: %v", o.ContainerName, err)
+	}
+	tempFile, err := ioutil.TempFile(tmpDir, "temp-marker")
+	if err != nil {
+		return fmt.Errorf("could not create temp marker file in %s: %v", tmpDir, err)
 	}
 	// write the exit code to the tempfile, sync to disk and close
 	if _, err = tempFile.Write(content); err != nil {
@@ -191,9 +238,14 @@ func optionOrDefault(option, defaultValue time.Duration) time.Duration {
 	return option
 }
 
-func gracefullyTerminate(command *exec.Cmd, done <-chan error, gracePeriod time.Duration) {
+func gracefullyTerminate(command *exec.Cmd, done <-chan error, gracePeriod time.Duration, signal *os.Signal) {
 	if err := command.Process.Signal(os.Interrupt); err != nil {
 		logrus.WithError(err).Error("Could not interrupt process after timeout")
+	}
+	if signal != nil {
+		if err := command.Process.Signal(*signal); err != nil {
+			logrus.WithError(err).Errorf("Could not send signal %v to process after timeout", signal)
+		}
 	}
 	select {
 	case <-done:

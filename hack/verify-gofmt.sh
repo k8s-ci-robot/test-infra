@@ -17,16 +17,10 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
-cmd="bazel run //:gofmt --"
-if ! which bazel &> /dev/null; then
-  echo "Bazel is the preferred way to build and test the test-infra repo." >&2
-  echo "Please install bazel at https://bazel.build/ (future commits may require it)" >&2
-  cmd="gofmt"
-fi
-diff=$(find . -name "*.go" | grep -v "\/vendor\/" | xargs $cmd -s -d)
-if [[ -n "${diff}" ]]; then
-  echo "${diff}"
-  echo
-  echo "Please run hack/update-gofmt.sh"
+if ! command -v bazel &> /dev/null; then
+  echo "Install bazel at https://bazel.build" >&2
   exit 1
 fi
+
+set -o xtrace
+bazel test --test_output=streamed @io_k8s_repo_infra//hack:verify-gofmt

@@ -1,13 +1,31 @@
-.loglines {
-    list-style-type: none;
-    padding: 0;
-    margin: 0;
-    line-height:1.2;
-    color: #e8e8e8;
-    background-color: #212121;
+body {
+    padding-left: 15px;
+    padding-bottom: 10px;
 }
-.loglines td {
-    padding-left: 0;
+
+html {
+    overflow-x: hidden;
+}
+
+.linetext button {
+    font-size: 1em;
+    text-align: left;
+    background: none;
+    color: #ccc;
+    margin: 0;
+    padding: 0;
+    border: none;
+    cursor: pointer;
+}
+
+.loglines {
+    color: #fff;
+    width: calc(100% - 30px);
+}
+.loglines .linetext span {
+    white-space: pre-wrap;
+    word-break: break-all;
+    overflow-wrap: break-word;
 }
 .line-highlighted {
     color: rgba(255, 224, 0, 1.0);
@@ -18,17 +36,36 @@
 .skipped {
     display: none;
 }
-td {
-    padding: 2px;
-}
-tr {
-    border: none;
-}
+
 .linenum {
     user-select: none;
-    color: rgba(255,255,2552,0.6);
+    -moz-user-select: none; /* for Firefox pre-69 */
+    -webkit-user-select: none; /* for Safari, Opera, and Edge (pre-Blink) */
+    color: rgba(255,255,255,0.6);
     text-align: right;
     vertical-align: top;
+    width: 50px;
+    text-overflow: ellipsis;
+    position: absolute;
+}
+
+.linenum a {
+    text-decoration: none;
+    color: inherit;
+}
+
+.linenum a:hover {
+    color: rgba(255,255,255,0.4);
+}
+
+.linetext {
+    width: calc(100% - 55px);
+    margin-left: 55px;
+    min-height: 20px;
+}
+
+.highlighted-line {
+    background-color: #555;
 }
 
 /* ansi colors from https://en.wikipedia.org/wiki/ANSI_escape_code#Colors */

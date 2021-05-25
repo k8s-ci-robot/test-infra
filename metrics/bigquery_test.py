@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 # Copyright 2017 The Kubernetes Authors.
 #
@@ -24,7 +24,7 @@ import sys
 import tempfile
 import unittest
 
-import yaml
+import ruamel.yaml as yaml
 
 import bigquery
 
@@ -58,7 +58,7 @@ class TestBigquery(unittest.TestCase):
 
         # Check that the '**' search finds the same number of yaml
         # files as the default search.
-        self.assertEqual(len(configs), len(config_metrics))
+        self.assertEqual(len(configs), len(config_metrics), "verify the `metric` feild is unique")
 
         # Check that config files correlate with metrics listed in
         # test-infra/metrics/README.md.
@@ -146,7 +146,7 @@ if __name__ == '__main__':
 
     # Remove the --jq flag and its value so that unittest.main can parse the remaining args without
     # complaining about an unknown flag.
-    for i in xrange(len(sys.argv)):
+    for i in range(len(sys.argv)):
         if sys.argv[i].startswith('--jq'):
             arg = sys.argv.pop(i)
             if '=' not in arg:

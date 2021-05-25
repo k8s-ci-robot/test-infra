@@ -17,13 +17,17 @@ limitations under the License.
 package approvers
 
 import (
+	"net/url"
+	"reflect"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/sirupsen/logrus"
 
-	"reflect"
-
 	"k8s.io/apimachinery/pkg/util/sets"
+
+	"k8s.io/test-infra/prow/plugins/ownersconfig"
 )
 
 func TestUnapprovedFiles(t *testing.T) {
@@ -104,7 +108,7 @@ func TestUnapprovedFiles(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		testApprovers := NewApprovers(Owners{filenames: test.filenames, repo: createFakeRepo(FakeRepoMap), seed: TEST_SEED, log: logrus.WithField("plugin", "some_plugin")})
+		testApprovers := NewApprovers(Owners{filenames: test.filenames, repo: createFakeRepo(FakeRepoMap), seed: TestSeed, log: logrus.WithField("plugin", "some_plugin")})
 		testApprovers.RequireIssue = false
 		for approver := range test.currentlyApproved {
 			testApprovers.AddApprover(approver, "REFERENCE", false)
@@ -148,33 +152,33 @@ func TestGetFiles(t *testing.T) {
 			testName:          "Single Root File PR Approved",
 			filenames:         []string{"kubernetes.go"},
 			currentlyApproved: sets.NewString(rootApprovers.List()[0]),
-			expectedFiles:     []File{ApprovedFile{"", sets.NewString(rootApprovers.List()[0]), "org", "project", "master"}},
+			expectedFiles:     []File{ApprovedFile{&url.URL{Scheme: "https", Host: "github.com", Path: "org/repo"}, "", ownersconfig.DefaultOwnersFile, sets.NewString(rootApprovers.List()[0]), "master"}},
 		},
 		{
 			testName:          "Single File PR in B No One Approved",
 			filenames:         []string{"b/test.go"},
 			currentlyApproved: sets.NewString(),
-			expectedFiles:     []File{UnapprovedFile{"b", "org", "project", "master"}},
+			expectedFiles:     []File{UnapprovedFile{&url.URL{Scheme: "https", Host: "github.com", Path: "org/repo"}, "b", ownersconfig.DefaultOwnersFile, "master"}},
 		},
 		{
 			testName:          "Single File PR in B Fully Approved",
 			filenames:         []string{"b/test.go"},
 			currentlyApproved: bApprovers,
-			expectedFiles:     []File{ApprovedFile{"b", bApprovers, "org", "project", "master"}},
+			expectedFiles:     []File{ApprovedFile{&url.URL{Scheme: "https", Host: "github.com", Path: "org/repo"}, "b", ownersconfig.DefaultOwnersFile, bApprovers, "master"}},
 		},
 		{
 			testName:          "Single Root File PR No One Approved",
 			filenames:         []string{"kubernetes.go"},
 			currentlyApproved: sets.NewString(),
-			expectedFiles:     []File{UnapprovedFile{"", "org", "project", "master"}},
+			expectedFiles:     []File{UnapprovedFile{&url.URL{Scheme: "https", Host: "github.com", Path: "org/repo"}, "", ownersconfig.DefaultOwnersFile, "master"}},
 		},
 		{
 			testName:          "Combo and Other; Neither Approved",
 			filenames:         []string{"a/combo/test.go", "a/d/test.go"},
 			currentlyApproved: sets.NewString(),
 			expectedFiles: []File{
-				UnapprovedFile{"a/combo", "org", "project", "master"},
-				UnapprovedFile{"a/d", "org", "project", "master"},
+				UnapprovedFile{&url.URL{Scheme: "https", Host: "github.com", Path: "org/repo"}, "a/combo", ownersconfig.DefaultOwnersFile, "master"},
+				UnapprovedFile{&url.URL{Scheme: "https", Host: "github.com", Path: "org/repo"}, "a/d", ownersconfig.DefaultOwnersFile, "master"},
 			},
 		},
 		{
@@ -182,8 +186,8 @@ func TestGetFiles(t *testing.T) {
 			filenames:         []string{"a/combo/test.go", "a/d/test.go"},
 			currentlyApproved: eApprovers,
 			expectedFiles: []File{
-				ApprovedFile{"a/combo", eApprovers, "org", "project", "master"},
-				UnapprovedFile{"a/d", "org", "project", "master"},
+				ApprovedFile{&url.URL{Scheme: "https", Host: "github.com", Path: "org/repo"}, "a/combo", ownersconfig.DefaultOwnersFile, eApprovers, "master"},
+				UnapprovedFile{&url.URL{Scheme: "https", Host: "github.com", Path: "org/repo"}, "a/d", ownersconfig.DefaultOwnersFile, "master"},
 			},
 		},
 		{
@@ -191,8 +195,8 @@ func TestGetFiles(t *testing.T) {
 			filenames:         []string{"a/combo/test.go", "a/d/test.go"},
 			currentlyApproved: edcApprovers.Intersection(dApprovers),
 			expectedFiles: []File{
-				ApprovedFile{"a/combo", edcApprovers.Intersection(dApprovers), "org", "project", "master"},
-				ApprovedFile{"a/d", edcApprovers.Intersection(dApprovers), "org", "project", "master"},
+				ApprovedFile{&url.URL{Scheme: "https", Host: "github.com", Path: "org/repo"}, "a/combo", ownersconfig.DefaultOwnersFile, edcApprovers.Intersection(dApprovers), "master"},
+				ApprovedFile{&url.URL{Scheme: "https", Host: "github.com", Path: "org/repo"}, "a/d", ownersconfig.DefaultOwnersFile, edcApprovers.Intersection(dApprovers), "master"},
 			},
 		},
 		{
@@ -200,9 +204,9 @@ func TestGetFiles(t *testing.T) {
 			filenames:         []string{"a/combo/test.go", "a/d/test.go", "c/test"},
 			currentlyApproved: cApprovers,
 			expectedFiles: []File{
-				ApprovedFile{"a/combo", cApprovers, "org", "project", "master"},
-				UnapprovedFile{"a/d", "org", "project", "master"},
-				ApprovedFile{"c", cApprovers, "org", "project", "master"},
+				ApprovedFile{&url.URL{Scheme: "https", Host: "github.com", Path: "org/repo"}, "a/combo", ownersconfig.DefaultOwnersFile, cApprovers, "master"},
+				UnapprovedFile{&url.URL{Scheme: "https", Host: "github.com", Path: "org/repo"}, "a/d", ownersconfig.DefaultOwnersFile, "master"},
+				ApprovedFile{&url.URL{Scheme: "https", Host: "github.com", Path: "org/repo"}, "c", ownersconfig.DefaultOwnersFile, cApprovers, "master"},
 			},
 		},
 		{
@@ -210,22 +214,24 @@ func TestGetFiles(t *testing.T) {
 			filenames:         []string{"a/test.go", "a/d/test.go", "b/test"},
 			currentlyApproved: rootApprovers.Union(aApprovers).Union(bApprovers),
 			expectedFiles: []File{
-				ApprovedFile{"a", rootApprovers.Union(aApprovers), "org", "project", "master"},
-				ApprovedFile{"b", rootApprovers.Union(bApprovers), "org", "project", "master"},
+				ApprovedFile{&url.URL{Scheme: "https", Host: "github.com", Path: "org/repo"}, "a", ownersconfig.DefaultOwnersFile, rootApprovers.Union(aApprovers), "master"},
+				ApprovedFile{&url.URL{Scheme: "https", Host: "github.com", Path: "org/repo"}, "b", ownersconfig.DefaultOwnersFile, rootApprovers.Union(bApprovers), "master"},
 			},
 		},
 	}
 
 	for _, test := range tests {
-		testApprovers := NewApprovers(Owners{filenames: test.filenames, repo: createFakeRepo(FakeRepoMap), seed: TEST_SEED, log: logrus.WithField("plugin", "some_plugin")})
-		testApprovers.RequireIssue = false
-		for approver := range test.currentlyApproved {
-			testApprovers.AddApprover(approver, "REFERENCE", false)
-		}
-		calculated := testApprovers.GetFiles("org", "project", "master")
-		if !reflect.DeepEqual(test.expectedFiles, calculated) {
-			t.Errorf("Failed for test %v.  Expected files: %v. Found %v", test.testName, test.expectedFiles, calculated)
-		}
+		t.Run(test.testName, func(t *testing.T) {
+			testApprovers := NewApprovers(Owners{filenames: test.filenames, repo: createFakeRepo(FakeRepoMap), seed: TestSeed, log: logrus.WithField("plugin", "some_plugin")})
+			testApprovers.RequireIssue = false
+			for approver := range test.currentlyApproved {
+				testApprovers.AddApprover(approver, "REFERENCE", false)
+			}
+			calculated := testApprovers.GetFiles(&url.URL{Scheme: "https", Host: "github.com", Path: "org/repo"}, "master")
+			if diff := cmp.Diff(test.expectedFiles, calculated, cmpopts.EquateEmpty(), cmp.Exporter(func(_ reflect.Type) bool { return true })); diff != "" {
+				t.Errorf("expected files differ from actual: %s", diff)
+			}
+		})
 	}
 }
 
@@ -253,56 +259,72 @@ func TestGetCCs(t *testing.T) {
 		testSeed  int64
 		assignees []string
 		// order matters for CCs
-		expectedCCs []string
+		expectedCCs          []string
+		expectedAssignedCCs  []string
+		expectedSuggestedCCs []string
 	}{
 		{
-			testName:          "Empty PR",
-			filenames:         []string{},
-			currentlyApproved: sets.NewString(),
-			testSeed:          0,
-			expectedCCs:       []string{},
+			testName:             "Empty PR",
+			filenames:            []string{},
+			currentlyApproved:    sets.NewString(),
+			testSeed:             0,
+			expectedCCs:          []string{},
+			expectedAssignedCCs:  []string{},
+			expectedSuggestedCCs: []string{},
 		},
 		{
-			testName:          "Single Root FFile PR Approved",
-			filenames:         []string{"kubernetes.go"},
-			currentlyApproved: sets.NewString(rootApprovers.List()[0]),
-			testSeed:          13,
-			expectedCCs:       []string{},
+			testName:             "Single Root FFile PR Approved",
+			filenames:            []string{"kubernetes.go"},
+			currentlyApproved:    sets.NewString(rootApprovers.List()[0]),
+			testSeed:             13,
+			expectedCCs:          []string{},
+			expectedAssignedCCs:  []string{},
+			expectedSuggestedCCs: []string{},
 		},
 		{
-			testName:          "Single Root File PR Unapproved Seed = 13",
-			filenames:         []string{"kubernetes.go"},
-			currentlyApproved: sets.NewString(),
-			testSeed:          13,
-			expectedCCs:       []string{"alice"},
+			testName:             "Single Root File PR Unapproved Seed = 13",
+			filenames:            []string{"kubernetes.go"},
+			currentlyApproved:    sets.NewString(),
+			testSeed:             13,
+			expectedCCs:          []string{"alice"},
+			expectedAssignedCCs:  []string{},
+			expectedSuggestedCCs: []string{"alice"},
 		},
 		{
-			testName:          "Single Root File PR No One Seed = 10",
-			filenames:         []string{"kubernetes.go"},
-			testSeed:          10,
-			currentlyApproved: sets.NewString(),
-			expectedCCs:       []string{"bob"},
+			testName:             "Single Root File PR No One Seed = 10",
+			filenames:            []string{"kubernetes.go"},
+			testSeed:             10,
+			currentlyApproved:    sets.NewString(),
+			expectedCCs:          []string{"bob"},
+			expectedAssignedCCs:  []string{},
+			expectedSuggestedCCs: []string{"bob"},
 		},
 		{
-			testName:          "Combo and Other; Neither Approved",
-			filenames:         []string{"a/combo/test.go", "a/d/test.go"},
-			testSeed:          0,
-			currentlyApproved: sets.NewString(),
-			expectedCCs:       []string{"dan"},
+			testName:             "Combo and Other; Neither Approved",
+			filenames:            []string{"a/combo/test.go", "a/d/test.go"},
+			testSeed:             0,
+			currentlyApproved:    sets.NewString(),
+			expectedCCs:          []string{"dan"},
+			expectedAssignedCCs:  []string{},
+			expectedSuggestedCCs: []string{"dan"},
 		},
 		{
-			testName:          "Combo and Other; Combo Approved",
-			filenames:         []string{"a/combo/test.go", "a/d/test.go"},
-			testSeed:          0,
-			currentlyApproved: eApprovers,
-			expectedCCs:       []string{"dan"},
+			testName:             "Combo and Other; Combo Approved",
+			filenames:            []string{"a/combo/test.go", "a/d/test.go"},
+			testSeed:             0,
+			currentlyApproved:    eApprovers,
+			expectedCCs:          []string{"dan"},
+			expectedAssignedCCs:  []string{},
+			expectedSuggestedCCs: []string{"dan"},
 		},
 		{
-			testName:          "Combo and Other; Both Approved",
-			filenames:         []string{"a/combo/test.go", "a/d/test.go"},
-			testSeed:          0,
-			currentlyApproved: dApprovers, // dApprovers can approve combo and d directory
-			expectedCCs:       []string{},
+			testName:             "Combo and Other; Both Approved",
+			filenames:            []string{"a/combo/test.go", "a/d/test.go"},
+			testSeed:             0,
+			currentlyApproved:    dApprovers, // dApprovers can approve combo and d directory
+			expectedCCs:          []string{},
+			expectedAssignedCCs:  []string{},
+			expectedSuggestedCCs: []string{},
 		},
 		{
 			testName:          "Combo, C, D; None Approved",
@@ -310,7 +332,9 @@ func TestGetCCs(t *testing.T) {
 			testSeed:          0,
 			currentlyApproved: sets.NewString(),
 			// chris can approve c and combo, debbie can approve d
-			expectedCCs: []string{"chris", "debbie"},
+			expectedCCs:          []string{"chris", "debbie"},
+			expectedAssignedCCs:  []string{},
+			expectedSuggestedCCs: []string{"chris", "debbie"},
 		},
 		{
 			testName:          "A, B, C; Nothing Approved",
@@ -318,7 +342,9 @@ func TestGetCCs(t *testing.T) {
 			testSeed:          0,
 			currentlyApproved: sets.NewString(),
 			// Need an approver from each of the three owners files
-			expectedCCs: []string{"anne", "bill", "carol"},
+			expectedCCs:          []string{"anne", "bill", "carol"},
+			expectedAssignedCCs:  []string{},
+			expectedSuggestedCCs: []string{"anne", "bill", "carol"},
 		},
 		{
 			testName:  "A, B, C; Partially approved by non-suggested approvers",
@@ -327,7 +353,9 @@ func TestGetCCs(t *testing.T) {
 			// Approvers are valid approvers, but not the one we would suggest
 			currentlyApproved: sets.NewString("Art", "Ben"),
 			// We don't suggest approvers for a and b, only for unapproved c.
-			expectedCCs: []string{"carol"},
+			expectedCCs:          []string{"carol"},
+			expectedAssignedCCs:  []string{},
+			expectedSuggestedCCs: []string{"carol"},
 		},
 		{
 			testName:  "A, B, C; Nothing approved, but assignees can approve",
@@ -338,7 +366,9 @@ func TestGetCCs(t *testing.T) {
 			assignees:         []string{"Art", "Ben"},
 			// We suggest assigned people rather than "suggested" people
 			// Suggested would be "Anne", "Bill", "Carol" if no one was assigned.
-			expectedCCs: []string{"art", "ben", "carol"},
+			expectedCCs:          []string{"art", "ben", "carol"},
+			expectedAssignedCCs:  []string{"art", "ben"},
+			expectedSuggestedCCs: []string{"carol"},
 		},
 		{
 			testName:          "A, B, C; Nothing approved, but SOME assignees can approve",
@@ -348,7 +378,9 @@ func TestGetCCs(t *testing.T) {
 			// Assignees are a mix of potential approvers and random people
 			assignees: []string{"Art", "Ben", "John", "Jack"},
 			// We suggest assigned people rather than "suggested" people
-			expectedCCs: []string{"art", "ben", "carol"},
+			expectedCCs:          []string{"art", "ben", "carol"},
+			expectedAssignedCCs:  []string{"art", "ben"},
+			expectedSuggestedCCs: []string{"carol"},
 		},
 		{
 			testName:          "Assignee is top OWNER, No one has approved",
@@ -356,8 +388,10 @@ func TestGetCCs(t *testing.T) {
 			testSeed:          0,
 			currentlyApproved: sets.NewString(),
 			// Assignee is a root approver
-			assignees:   []string{"alice"},
-			expectedCCs: []string{"alice"},
+			assignees:            []string{"alice"},
+			expectedCCs:          []string{"alice"},
+			expectedAssignedCCs:  []string{"alice"},
+			expectedSuggestedCCs: []string{},
 		},
 	}
 
@@ -371,6 +405,14 @@ func TestGetCCs(t *testing.T) {
 		calculated := testApprovers.GetCCs()
 		if !reflect.DeepEqual(test.expectedCCs, calculated) {
 			t.Errorf("Failed for test %v.  Expected CCs: %v. Found %v", test.testName, test.expectedCCs, calculated)
+		}
+		calculated = testApprovers.AssignedCCs()
+		if !reflect.DeepEqual(test.expectedAssignedCCs, calculated) {
+			t.Errorf("Failed for test %v.  Expected AssignedCCs: %v. Found %v", test.testName, test.expectedAssignedCCs, calculated)
+		}
+		calculated = testApprovers.SuggestedCCs()
+		if !reflect.DeepEqual(test.expectedSuggestedCCs, calculated) {
+			t.Errorf("Failed for test %v.  Expected SuggestedCCs: %v. Found %v", test.testName, test.expectedSuggestedCCs, calculated)
 		}
 	}
 }
@@ -390,20 +432,22 @@ func TestIsApproved(t *testing.T) {
 		"c":       cApprovers,
 		"a/d":     dApprovers,
 		"a/combo": edcApprovers,
+		"d":       {},
 	}
 	tests := []struct {
-		testName          string
-		filenames         []string
-		currentlyApproved sets.String
-		testSeed          int64
-		isApproved        bool
+		testName               string
+		filenames              []string
+		allowFolderCreationMap map[string]bool
+		currentlyApproved      sets.String
+		testSeed               int64
+		isApproved             bool
 	}{
 		{
 			testName:          "Empty PR",
 			filenames:         []string{},
 			currentlyApproved: sets.NewString(),
 			testSeed:          0,
-			isApproved:        true,
+			isApproved:        false,
 		},
 		{
 			testName:          "Single Root File PR Approved",
@@ -461,17 +505,62 @@ func TestIsApproved(t *testing.T) {
 			currentlyApproved: sets.NewString("Anne", "Ben", "Carol"),
 			isApproved:        true,
 		},
+		{
+			testName:               "File in folder with AllowFolderCreation does not get approved",
+			filenames:              []string{"a/test.go"},
+			allowFolderCreationMap: map[string]bool{"a": true},
+			isApproved:             false,
+		},
+		{
+			testName:               "Subfolder in folder with AllowFolderCreation gets approved",
+			filenames:              []string{"a/new-folder/test.go"},
+			allowFolderCreationMap: map[string]bool{"a": true},
+			isApproved:             true,
+		},
+		{
+			testName:               "Subfolder in folder with AllowFolderCreation whose ownersfile has no approvers gets approved",
+			filenames:              []string{"d/new-folder/test.go"},
+			allowFolderCreationMap: map[string]bool{"d": true},
+			isApproved:             true,
+		},
+		{
+			testName:               "Subfolder in folder with AllowFolderCreation and other unapproved file does not get approved",
+			filenames:              []string{"b/unapproved.go", "a/new-folder/test.go"},
+			allowFolderCreationMap: map[string]bool{"a": true},
+			isApproved:             false,
+		},
+		{
+			testName:               "Subfolder in folder with AllowFolderCreation and approved file, approved",
+			filenames:              []string{"b/approved.go", "a/new-folder/test.go"},
+			allowFolderCreationMap: map[string]bool{"a": true},
+			currentlyApproved:      sets.NewString(bApprovers.List()[0]),
+			isApproved:             true,
+		},
+		{
+			testName:               "Nested subfolder in folder with AllowFolderCreation gets approved",
+			filenames:              []string{"a/new-folder/child/grandchild/test.go"},
+			allowFolderCreationMap: map[string]bool{"a": true},
+			isApproved:             true,
+		},
+		{
+			testName:               "Change in folder with Owners whose parent has AllowFolderCreation does not get approved",
+			filenames:              []string{"a/d/new-file.go"},
+			allowFolderCreationMap: map[string]bool{"a": true},
+			isApproved:             false,
+		},
 	}
 
 	for _, test := range tests {
-		testApprovers := NewApprovers(Owners{filenames: test.filenames, repo: createFakeRepo(FakeRepoMap), seed: test.testSeed, log: logrus.WithField("plugin", "some_plugin")})
-		for approver := range test.currentlyApproved {
-			testApprovers.AddApprover(approver, "REFERENCE", false)
-		}
-		calculated := testApprovers.IsApproved()
-		if test.isApproved != calculated {
-			t.Errorf("Failed for test %v.  Expected Approval Status: %v. Found %v", test.testName, test.isApproved, calculated)
-		}
+		t.Run(test.testName, func(t *testing.T) {
+			testApprovers := NewApprovers(Owners{filenames: test.filenames, repo: createFakeRepo(FakeRepoMap, func(fr *FakeRepo) { fr.autoApproveUnownedSubfolders = test.allowFolderCreationMap }), seed: test.testSeed, log: logrus.WithField("plugin", "some_plugin")})
+			for approver := range test.currentlyApproved {
+				testApprovers.AddApprover(approver, "REFERENCE", false)
+			}
+			calculated := testApprovers.IsApproved()
+			if test.isApproved != calculated {
+				t.Errorf("Failed for test %v.  Expected Approval Status: %v. Found %v", test.testName, test.isApproved, calculated)
+			}
+		})
 	}
 }
 
@@ -708,28 +797,24 @@ func TestGetMessage(t *testing.T) {
 	want := `[APPROVALNOTIFIER] This PR is **NOT APPROVED**
 
 This pull-request has been approved by: *<a href="REFERENCE" title="Approved">Bill</a>*
-To fully approve this pull request, please assign additional approvers.
-We suggest the following additional approver: **alice**
-
-If they are not already assigned, you can assign the PR to them by writing ` + "`/assign @alice`" + ` in a comment when ready.
+To complete the [pull request process](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process), please assign **alice** after the PR has been reviewed.
+You can assign the PR to them by writing ` + "`/assign @alice`" + ` in a comment when ready.
 
 *No associated issue*. Update pull-request body to add a reference to an issue, or get approval with ` + "`/approve no-issue`" + `
 
-The full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands).
-
-The pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)
+The full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=org%2Frepo).
 
 <details open>
 Needs approval from an approver in each of these files:
 
-- **[a/OWNERS](https://github.com/org/project/blob/dev/a/OWNERS)**
-- ~~[b/OWNERS](https://github.com/org/project/blob/dev/b/OWNERS)~~ [Bill]
+- **[a/OWNERS](https://github.com/org/repo/blob/dev/a/OWNERS)**
+- ~~[b/OWNERS](https://github.com/org/repo/blob/dev/b/OWNERS)~~ [Bill]
 
 Approvers can indicate their approval by writing ` + "`/approve`" + ` in a comment
 Approvers can cancel approval by writing ` + "`/approve cancel`" + ` in a comment
 </details>
 <!-- META={"approvers":["alice"]} -->`
-	if got := GetMessage(ap, "org", "project", "dev"); got == nil {
+	if got := GetMessage(ap, &url.URL{Scheme: "https", Host: "github.com"}, "https://go.k8s.io/bot-commands", "https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process", "org", "repo", "dev"); got == nil {
 		t.Error("GetMessage() failed")
 	} else if *got != want {
 		t.Errorf("GetMessage() = %+v, want = %+v", *got, want)
@@ -757,21 +842,21 @@ This pull-request has been approved by: *<a href="REFERENCE" title="Approved">Al
 
 *No associated issue*. Update pull-request body to add a reference to an issue, or get approval with ` + "`/approve no-issue`" + `
 
-The full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands).
+The full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=org%2Frepo).
 
 The pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)
 
 <details >
 Needs approval from an approver in each of these files:
 
-- ~~[a/OWNERS](https://github.com/org/project/blob/master/a/OWNERS)~~ [Alice]
-- ~~[b/OWNERS](https://github.com/org/project/blob/master/b/OWNERS)~~ [Bill]
+- ~~[a/OWNERS](https://github.com/org/repo/blob/master/a/OWNERS)~~ [Alice]
+- ~~[b/OWNERS](https://github.com/org/repo/blob/master/b/OWNERS)~~ [Bill]
 
 Approvers can indicate their approval by writing ` + "`/approve`" + ` in a comment
 Approvers can cancel approval by writing ` + "`/approve cancel`" + ` in a comment
 </details>
 <!-- META={"approvers":[]} -->`
-	if got := GetMessage(ap, "org", "project", "master"); got == nil {
+	if got := GetMessage(ap, &url.URL{Scheme: "https", Host: "github.com"}, "https://go.k8s.io/bot-commands", "https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process", "org", "repo", "master"); got == nil {
 		t.Error("GetMessage() failed")
 	} else if *got != want {
 		t.Errorf("GetMessage() = %+v, want = %+v", *got, want)
@@ -794,28 +879,24 @@ func TestGetMessageNoneApproved(t *testing.T) {
 	want := `[APPROVALNOTIFIER] This PR is **NOT APPROVED**
 
 This pull-request has been approved by: *<a href="REFERENCE" title="Author self-approved">John</a>*
-To fully approve this pull request, please assign additional approvers.
-We suggest the following additional approvers: **alice**, **bill**
-
-If they are not already assigned, you can assign the PR to them by writing ` + "`/assign @alice @bill`" + ` in a comment when ready.
+To complete the [pull request process](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process), please assign **alice**, **bill** after the PR has been reviewed.
+You can assign the PR to them by writing ` + "`/assign @alice @bill`" + ` in a comment when ready.
 
 *No associated issue*. Update pull-request body to add a reference to an issue, or get approval with ` + "`/approve no-issue`" + `
 
-The full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands).
-
-The pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)
+The full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=org%2Frepo).
 
 <details open>
 Needs approval from an approver in each of these files:
 
-- **[a/OWNERS](https://github.com/org/project/blob/master/a/OWNERS)**
-- **[b/OWNERS](https://github.com/org/project/blob/master/b/OWNERS)**
+- **[a/OWNERS](https://github.com/org/repo/blob/master/a/OWNERS)**
+- **[b/OWNERS](https://github.com/org/repo/blob/master/b/OWNERS)**
 
 Approvers can indicate their approval by writing ` + "`/approve`" + ` in a comment
 Approvers can cancel approval by writing ` + "`/approve cancel`" + ` in a comment
 </details>
 <!-- META={"approvers":["alice","bill"]} -->`
-	if got := GetMessage(ap, "org", "project", "master"); got == nil {
+	if got := GetMessage(ap, &url.URL{Scheme: "https", Host: "github.com"}, "https://go.k8s.io/bot-commands", "https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process", "org", "repo", "master"); got == nil {
 		t.Error("GetMessage() failed")
 	} else if *got != want {
 		t.Errorf("GetMessage() = %+v, want = %+v", *got, want)
@@ -845,21 +926,21 @@ This pull-request has been approved by: *<a href="REFERENCE" title="Approved">Al
 
 Associated issue: *#12345*
 
-The full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands).
+The full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=org%2Frepo).
 
 The pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)
 
 <details >
 Needs approval from an approver in each of these files:
 
-- ~~[a/OWNERS](https://github.com/org/project/blob/master/a/OWNERS)~~ [Alice]
-- ~~[b/OWNERS](https://github.com/org/project/blob/master/b/OWNERS)~~ [Bill]
+- ~~[a/OWNERS](https://github.com/org/repo/blob/master/a/OWNERS)~~ [Alice]
+- ~~[b/OWNERS](https://github.com/org/repo/blob/master/b/OWNERS)~~ [Bill]
 
 Approvers can indicate their approval by writing ` + "`/approve`" + ` in a comment
 Approvers can cancel approval by writing ` + "`/approve cancel`" + ` in a comment
 </details>
 <!-- META={"approvers":[]} -->`
-	if got := GetMessage(ap, "org", "project", "master"); got == nil {
+	if got := GetMessage(ap, &url.URL{Scheme: "https", Host: "github.com"}, "https://go.k8s.io/bot-commands", "https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process", "org", "repo", "master"); got == nil {
 		t.Error("GetMessage() failed")
 	} else if *got != want {
 		t.Errorf("GetMessage() = %+v, want = %+v", *got, want)
@@ -888,21 +969,21 @@ This pull-request has been approved by: *<a href="REFERENCE" title="Approved">Al
 
 Associated issue requirement bypassed by: *<a href="REFERENCE" title="Approved">Alice</a>*, *<a href="REFERENCE" title="Approved">Bill</a>*
 
-The full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands).
+The full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=org%2Frepo).
 
 The pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)
 
 <details >
 Needs approval from an approver in each of these files:
 
-- ~~[a/OWNERS](https://github.com/org/project/blob/master/a/OWNERS)~~ [Alice]
-- ~~[b/OWNERS](https://github.com/org/project/blob/master/b/OWNERS)~~ [Bill]
+- ~~[a/OWNERS](https://github.com/org/repo/blob/master/a/OWNERS)~~ [Alice]
+- ~~[b/OWNERS](https://github.com/org/repo/blob/master/b/OWNERS)~~ [Bill]
 
 Approvers can indicate their approval by writing ` + "`/approve`" + ` in a comment
 Approvers can cancel approval by writing ` + "`/approve cancel`" + ` in a comment
 </details>
 <!-- META={"approvers":[]} -->`
-	if got := GetMessage(ap, "org", "project", "master"); got == nil {
+	if got := GetMessage(ap, &url.URL{Scheme: "https", Host: "github.com"}, "https://go.k8s.io/bot-commands", "https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process", "org", "repo", "master"); got == nil {
 		t.Error("GetMessage() failed")
 	} else if *got != want {
 		t.Errorf("GetMessage() = %+v, want = %+v", *got, want)
@@ -926,28 +1007,65 @@ func TestGetMessageMDOwners(t *testing.T) {
 	want := `[APPROVALNOTIFIER] This PR is **NOT APPROVED**
 
 This pull-request has been approved by: *<a href="REFERENCE" title="Author self-approved">John</a>*
-To fully approve this pull request, please assign additional approvers.
-We suggest the following additional approvers: **alice**, **doctor**
-
-If they are not already assigned, you can assign the PR to them by writing ` + "`/assign @alice @doctor`" + ` in a comment when ready.
+To complete the [pull request process](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process), please assign **alice**, **doctor** after the PR has been reviewed.
+You can assign the PR to them by writing ` + "`/assign @alice @doctor`" + ` in a comment when ready.
 
 *No associated issue*. Update pull-request body to add a reference to an issue, or get approval with ` + "`/approve no-issue`" + `
 
-The full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands).
-
-The pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)
+The full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=org%2Frepo).
 
 <details open>
 Needs approval from an approver in each of these files:
 
-- **[a/OWNERS](https://github.com/org/project/blob/master/a/OWNERS)**
-- **[b/README.md](https://github.com/org/project/blob/master/b/README.md)**
+- **[a/OWNERS](https://github.com/org/repo/blob/master/a/OWNERS)**
+- **[b/README.md](https://github.com/org/repo/blob/master/b/README.md)**
 
 Approvers can indicate their approval by writing ` + "`/approve`" + ` in a comment
 Approvers can cancel approval by writing ` + "`/approve cancel`" + ` in a comment
 </details>
 <!-- META={"approvers":["alice","doctor"]} -->`
-	if got := GetMessage(ap, "org", "project", "master"); got == nil {
+	if got := GetMessage(ap, &url.URL{Scheme: "https", Host: "github.com"}, "https://go.k8s.io/bot-commands", "https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process", "org", "repo", "master"); got == nil {
+		t.Error("GetMessage() failed")
+	} else if *got != want {
+		t.Errorf("GetMessage() = %+v, want = %+v", *got, want)
+	}
+}
+
+func TestGetMessageDifferentGitHubLink(t *testing.T) {
+	ap := NewApprovers(
+		Owners{
+			filenames: []string{"a/a.go", "b/README.md"},
+			repo: createFakeRepo(map[string]sets.String{
+				"a":           sets.NewString("Alice"),
+				"b":           sets.NewString("Bill"),
+				"b/README.md": sets.NewString("Doctor"),
+			}),
+			log: logrus.WithField("plugin", "some_plugin"),
+		},
+	)
+	ap.AddAuthorSelfApprover("John", "REFERENCE", false)
+	ap.RequireIssue = true
+	want := `[APPROVALNOTIFIER] This PR is **NOT APPROVED**
+
+This pull-request has been approved by: *<a href="REFERENCE" title="Author self-approved">John</a>*
+To complete the [pull request process](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process), please assign **alice**, **doctor** after the PR has been reviewed.
+You can assign the PR to them by writing ` + "`/assign @alice @doctor`" + ` in a comment when ready.
+
+*No associated issue*. Update pull-request body to add a reference to an issue, or get approval with ` + "`/approve no-issue`" + `
+
+The full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=org%2Frepo).
+
+<details open>
+Needs approval from an approver in each of these files:
+
+- **[a/OWNERS](https://github.mycorp.com/org/repo/blob/master/a/OWNERS)**
+- **[b/README.md](https://github.mycorp.com/org/repo/blob/master/b/README.md)**
+
+Approvers can indicate their approval by writing ` + "`/approve`" + ` in a comment
+Approvers can cancel approval by writing ` + "`/approve cancel`" + ` in a comment
+</details>
+<!-- META={"approvers":["alice","doctor"]} -->`
+	if got := GetMessage(ap, &url.URL{Scheme: "https", Host: "github.mycorp.com"}, "https://go.k8s.io/bot-commands", "https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process", "org", "repo", "master"); got == nil {
 		t.Error("GetMessage() failed")
 	} else if *got != want {
 		t.Errorf("GetMessage() = %+v, want = %+v", *got, want)

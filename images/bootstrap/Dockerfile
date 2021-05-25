@@ -14,8 +14,7 @@
 
 # Includes basic workspace setup, with gcloud and a bootstrap runner
 
-FROM debian:jessie
-LABEL maintainer="Sen Lu <senlu@google.com>"
+FROM debian:buster
 
 WORKDIR /workspace
 RUN mkdir -p /workspace
@@ -38,18 +37,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     mercurial \
     openssh-client \
     pkg-config \
+    procps \
     python \
     python-dev \
+    python-gflags \
     python-openssl \
     python-pip \
+    python-yaml \
+    python3 \
+    python3-distutils \
+    python3-gflags \
+    python3-pip \
+    python3-yaml \
     rsync \
     unzip \
     wget \
     xz-utils \
     zip \
     zlib1g-dev \
-    && apt-get clean \
-    && python -m pip install --upgrade pip setuptools wheel
+    && rm -rf /var/lib/apt/lists/* \
+    && python -m pip install --upgrade pip setuptools wheel \
+    && python3 -m pip install --upgrade pip setuptools wheel
 
 # Install gcloud
 
@@ -81,7 +89,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     gnupg2 \
     software-properties-common \
-    lsb-release
+    lsb-release && \
+    rm -rf /var/lib/apt/lists/*
 
 # Add the Docker apt-repository
 RUN curl -fsSL https://download.docker.com/linux/$(. /etc/os-release; echo "$ID")/gpg \
@@ -91,16 +100,18 @@ RUN curl -fsSL https://download.docker.com/linux/$(. /etc/os-release; echo "$ID"
     $(lsb_release -cs) stable"
 
 # Install Docker
-# TODO(bentheelder): the `sed` is a bit of a hack, look into alternatives.
+# TODO: the `sed` is a bit of a hack, look into alternatives.
 # Why this exists: `docker service start` on debian runs a `cgroupfs_mount` method,
 # We're already inside docker though so we can be sure these are already mounted.
 # Trying to remount these makes for a very noisy error block in the beginning of
 # the pod logs, so we just comment out the call to it... :shrug:
-# TODO(benthelder): update docker version. This is pinned because of
-# https://github.com/kubernetes/test-infra/issues/6187
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends docker-ce=18.06.0* && \
-    sed -i 's/cgroupfs_mount$/#cgroupfs_mount\n/' /etc/init.d/docker
+    apt-get install -y --no-install-recommends docker-ce=5:20.10.* && \
+    rm -rf /var/lib/apt/lists/* && \
+    sed -i 's/cgroupfs_mount$/#cgroupfs_mount\n/' /etc/init.d/docker \
+    && update-alternatives --set iptables /usr/sbin/iptables-legacy \
+    && update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy
+
 
 
 # Move Docker's storage location
@@ -109,9 +120,6 @@ RUN echo 'DOCKER_OPTS="${DOCKER_OPTS} --data-root=/docker-graph"' | \
 # NOTE this should be mounted and persisted as a volume ideally (!)
 # We will make a fallback one now just in case
 RUN mkdir /docker-graph
-
-# add custom docker cleanup binary
-COPY ["barnacle/barnacle", "/usr/local/bin/"]
 
 #
 # END: DOCKER IN DOCKER SETUP
@@ -129,5 +137,7 @@ COPY ["entrypoint.sh", "runner.sh", "create_bazel_cache_rcs.sh", \
 # scenario scripts from cloned test-infra
 RUN mkdir /workspace/scenarios
 COPY ["./scenarios", "/workspace/scenarios"]
+
+RUN git clone https://github.com/kubernetes/test-infra /workspace/test-infra
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
