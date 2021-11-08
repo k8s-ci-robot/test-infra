@@ -19,7 +19,8 @@ package gcsupload
 import (
 	"testing"
 
-	"k8s.io/test-infra/prow/kube"
+	prowapi "k8s.io/test-infra/prow/apis/prowjobs/v1"
+	"k8s.io/test-infra/prow/flagutil"
 )
 
 func TestOptions_Validate(t *testing.T) {
@@ -32,8 +33,8 @@ func TestOptions_Validate(t *testing.T) {
 			name: "minimal set ok",
 			input: Options{
 				DryRun: true,
-				GCSConfiguration: &kube.GCSConfiguration{
-					PathStrategy: kube.PathStrategyExplicit,
+				GCSConfiguration: &prowapi.GCSConfiguration{
+					PathStrategy: prowapi.PathStrategyExplicit,
 				},
 			},
 			expectedErr: false,
@@ -41,11 +42,13 @@ func TestOptions_Validate(t *testing.T) {
 		{
 			name: "push to GCS, ok",
 			input: Options{
-				DryRun:             false,
-				GcsCredentialsFile: "secrets",
-				GCSConfiguration: &kube.GCSConfiguration{
+				DryRun: false,
+				StorageClientOptions: flagutil.StorageClientOptions{
+					GCSCredentialsFile: "secrets",
+				},
+				GCSConfiguration: &prowapi.GCSConfiguration{
 					Bucket:       "seal",
-					PathStrategy: kube.PathStrategyExplicit,
+					PathStrategy: prowapi.PathStrategyExplicit,
 				},
 			},
 			expectedErr: false,
@@ -53,21 +56,12 @@ func TestOptions_Validate(t *testing.T) {
 		{
 			name: "push to GCS, missing bucket",
 			input: Options{
-				DryRun:             false,
-				GcsCredentialsFile: "secrets",
-				GCSConfiguration: &kube.GCSConfiguration{
-					PathStrategy: kube.PathStrategyExplicit,
-				},
-			},
-			expectedErr: true,
-		},
-		{
-			name: "push to GCS, missing credentials",
-			input: Options{
 				DryRun: false,
-				GCSConfiguration: &kube.GCSConfiguration{
-					Bucket:       "seal",
-					PathStrategy: kube.PathStrategyExplicit,
+				StorageClientOptions: flagutil.StorageClientOptions{
+					GCSCredentialsFile: "secrets",
+				},
+				GCSConfiguration: &prowapi.GCSConfiguration{
+					PathStrategy: prowapi.PathStrategyExplicit,
 				},
 			},
 			expectedErr: true,
@@ -100,7 +94,7 @@ func TestValidatePathOptions(t *testing.T) {
 		},
 		{
 			name:        "explicit strategy, no defaults",
-			strategy:    kube.PathStrategyExplicit,
+			strategy:    prowapi.PathStrategyExplicit,
 			expectedErr: false,
 		},
 		{
@@ -156,7 +150,7 @@ func TestValidatePathOptions(t *testing.T) {
 	for _, testCase := range testCases {
 		o := Options{
 			DryRun: true,
-			GCSConfiguration: &kube.GCSConfiguration{
+			GCSConfiguration: &prowapi.GCSConfiguration{
 				PathStrategy: testCase.strategy,
 				DefaultOrg:   testCase.org,
 				DefaultRepo:  testCase.repo,

@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 # Copyright 2018 The Kubernetes Authors.
 #
@@ -20,25 +20,16 @@
 # shift_nodepool_capacity.py pool-to-drain pool-to-grow shrink_increment:grow_increment num_to_add
 #
 # EG:
-# shift_nodepool_capacity.py default-pool pool-n1-highmem-8-300gb 2:1 5
+# shift_nodepool_capacity.py 5 2:1 default-pool pool-n1-highmem-8-300gb
 #
 # for nodefs on the prow builds cluster
 # USE AT YOUR OWN RISK.
-# TODO(bentheelder): delete this once dynamic kubelet config is available
 
-
-from __future__ import print_function
-
+import argparse
 import sys
 import subprocess
 import json
 import math
-
-# xref prow/Makefile get-build-cluster-credentials
-# TODO(bentheelder): perhaps make these configurable
-CLUSTER = 'prow'
-ZONE = 'us-central1-f'
-PROJECT = 'k8s-prow-builds'
 
 
 def get_pool_sizes(project, zone, cluster):
@@ -50,7 +41,7 @@ def get_pool_sizes(project, zone, cluster):
         'gcloud', 'container', 'node-pools', 'list',
         '--project', project, '--cluster', cluster, '--zone', zone,
         '--format=json',
-    ]))
+    ], encoding='utf-8'))
     group_to_pool = {}
     for pool in node_pools:
         # later on we will sum up node counts from instance groups
@@ -66,7 +57,7 @@ def get_pool_sizes(project, zone, cluster):
         'gcloud', 'compute', 'instance-groups', 'list',
         '--project', project, '--filter=zone:({})'.format(zone),
         '--format=json',
-    ]))
+    ], encoding='utf-8'))
     for group in groups:
         if group['name'] not in group_to_pool:
             continue
@@ -80,7 +71,7 @@ def resize_nodepool(pool, new_size, project, zone, cluster):
     cmd = [
         'gcloud', 'container', 'clusters', 'resize', cluster,
         '--zone', zone, '--project', project, '--node-pool', pool,
-        '--size', str(new_size), '--quiet',
+        '--num-nodes', str(new_size), '--quiet',
     ]
     print(cmd)
     subprocess.call(cmd)
@@ -89,25 +80,46 @@ def resize_nodepool(pool, new_size, project, zone, cluster):
 def prompt_confirmation():
     """prompts for interactive confirmation, exits 1 unless input is 'yes'"""
     sys.stdout.write('Please confirm (yes/no): ')
-    response = raw_input()
+    response = input()
     if response != 'yes':
         print('Cancelling.')
         sys.exit(-1)
     print('Confirmed.')
 
 
-def main():
-    # parse cli
-    nodes_to_add = int(sys.argv[-1])
+# xref prow/Makefile get-build-cluster-credentials
+def parse_args(args):
+    parser = argparse.ArgumentParser()
+    parser.add_argument('nodes', type=int,
+                        help='Number of Nodes to add.')
+    parser.add_argument('ratio', type=str,
+                        help='ShrinkIncrement:GrowIncrement, Ex 2:1.')
+    parser.add_argument('shrink', type=str,
+                        help='Pool name to drain nodes from.')
+    parser.add_argument('grow', type=str,
+                        help='Pool name to grow nodes into.')
+    parser.add_argument('--cluster', type=str, default="prow",
+                        help='Name of GCP cluster.')
+    parser.add_argument('--zone', type=str, default='us-central1-f',
+                        help='GCP zonal location of the cluster.')
+    parser.add_argument('--project', type=str, default='k8s-prow-builds',
+                        help='GCP Project that the cluster exists within.')
+    return parser.parse_args(args)
 
-    ratio = sys.argv[-2].split(':')
+
+def main(options):
+    # parse cli
+    nodes_to_add = options.nodes
+
+    ratio = options.ratio.split(':')
     shrink_increment, grow_increment = int(ratio[0]), int(ratio[1])
 
-    pool_to_grow = sys.argv[-3]
-    pool_to_shrink = sys.argv[-4]
+    pool_to_grow = options.grow
+    pool_to_shrink = options.shrink
 
     # obtain current pool sizes
-    pool_sizes = get_pool_sizes(PROJECT, ZONE, CLUSTER)
+    project, zone, cluster = options.project, options.zone, options.cluster
+    pool_sizes = get_pool_sizes(project, zone, cluster)
     pool_to_grow_initial = pool_sizes[pool_to_grow]
     pool_to_shrink_initial = pool_sizes[pool_to_shrink]
 
@@ -124,7 +136,7 @@ def main():
         'Shifting NodePool capacity for project = "{project}",'
         'zone = "{zone}", cluster = "{cluster}"'
         ).format(
-            project=PROJECT, zone=ZONE, cluster=CLUSTER,
+            project=project, zone=zone, cluster=cluster,
         ))
     print('')
     print((
@@ -167,7 +179,7 @@ def main():
             shrink_increment=shrink_increment, pool_to_shrink=pool_to_shrink,
         ))
         new_size = max(pool_to_shrink_initial - (i*shrink_increment + shrink_increment), 0)
-        resize_nodepool(pool_to_shrink, new_size, PROJECT, ZONE, CLUSTER)
+        resize_nodepool(pool_to_shrink, new_size, project, zone, cluster)
         print('')
 
         # ditto for growing, modulo the cap
@@ -176,11 +188,11 @@ def main():
             num_to_add=num_to_add, pool_to_grow=pool_to_grow,
         ))
         new_size = pool_to_grow_initial + (i*grow_increment + num_to_add)
-        resize_nodepool(pool_to_grow, new_size, PROJECT, ZONE, CLUSTER)
+        resize_nodepool(pool_to_grow, new_size, project, zone, cluster)
         print('')
 
     print('')
     print('Done')
 
 if __name__ == '__main__':
-    main()
+    main(parse_args(sys.argv[1:]))

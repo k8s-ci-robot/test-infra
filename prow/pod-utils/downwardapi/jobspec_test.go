@@ -20,7 +20,7 @@ import (
 	"reflect"
 	"testing"
 
-	"k8s.io/test-infra/prow/kube"
+	prowapi "k8s.io/test-infra/prow/apis/prowjobs/v1"
 )
 
 func TestEnvironmentForSpec(t *testing.T) {
@@ -32,27 +32,28 @@ func TestEnvironmentForSpec(t *testing.T) {
 		{
 			name: "periodic job",
 			spec: JobSpec{
-				Type:      kube.PeriodicJob,
+				Type:      prowapi.PeriodicJob,
 				Job:       "job-name",
 				BuildID:   "0",
 				ProwJobID: "prowjob",
 			},
 			expected: map[string]string{
+				"CI":          "true",
 				"JOB_NAME":    "job-name",
 				"BUILD_ID":    "0",
 				"PROW_JOB_ID": "prowjob",
 				"JOB_TYPE":    "periodic",
-				"JOB_SPEC":    `{"type":"periodic","job":"job-name","buildid":"0","prowjobid":"prowjob","refs":{}}`,
+				"JOB_SPEC":    `{"type":"periodic","job":"job-name","buildid":"0","prowjobid":"prowjob"}`,
 			},
 		},
 		{
 			name: "postsubmit job",
 			spec: JobSpec{
-				Type:      kube.PostsubmitJob,
+				Type:      prowapi.PostsubmitJob,
 				Job:       "job-name",
 				BuildID:   "0",
 				ProwJobID: "prowjob",
-				Refs: kube.Refs{
+				Refs: &prowapi.Refs{
 					Org:     "org-name",
 					Repo:    "repo-name",
 					BaseRef: "base-ref",
@@ -60,6 +61,7 @@ func TestEnvironmentForSpec(t *testing.T) {
 				},
 			},
 			expected: map[string]string{
+				"CI":            "true",
 				"JOB_NAME":      "job-name",
 				"BUILD_ID":      "0",
 				"PROW_JOB_ID":   "prowjob",
@@ -75,16 +77,16 @@ func TestEnvironmentForSpec(t *testing.T) {
 		{
 			name: "batch job",
 			spec: JobSpec{
-				Type:      kube.BatchJob,
+				Type:      prowapi.BatchJob,
 				Job:       "job-name",
 				BuildID:   "0",
 				ProwJobID: "prowjob",
-				Refs: kube.Refs{
+				Refs: &prowapi.Refs{
 					Org:     "org-name",
 					Repo:    "repo-name",
 					BaseRef: "base-ref",
 					BaseSHA: "base-sha",
-					Pulls: []kube.Pull{{
+					Pulls: []prowapi.Pull{{
 						Number: 1,
 						Author: "author-name",
 						SHA:    "pull-sha",
@@ -96,6 +98,7 @@ func TestEnvironmentForSpec(t *testing.T) {
 				},
 			},
 			expected: map[string]string{
+				"CI":            "true",
 				"JOB_NAME":      "job-name",
 				"BUILD_ID":      "0",
 				"PROW_JOB_ID":   "prowjob",
@@ -111,16 +114,16 @@ func TestEnvironmentForSpec(t *testing.T) {
 		{
 			name: "presubmit job",
 			spec: JobSpec{
-				Type:      kube.PresubmitJob,
+				Type:      prowapi.PresubmitJob,
 				Job:       "job-name",
 				BuildID:   "0",
 				ProwJobID: "prowjob",
-				Refs: kube.Refs{
+				Refs: &prowapi.Refs{
 					Org:     "org-name",
 					Repo:    "repo-name",
 					BaseRef: "base-ref",
 					BaseSHA: "base-sha",
-					Pulls: []kube.Pull{{
+					Pulls: []prowapi.Pull{{
 						Number: 1,
 						Author: "author-name",
 						SHA:    "pull-sha",
@@ -128,6 +131,7 @@ func TestEnvironmentForSpec(t *testing.T) {
 				},
 			},
 			expected: map[string]string{
+				"CI":            "true",
 				"JOB_NAME":      "job-name",
 				"BUILD_ID":      "0",
 				"PROW_JOB_ID":   "prowjob",
@@ -145,36 +149,38 @@ func TestEnvironmentForSpec(t *testing.T) {
 		{
 			name: "kubernetes agent",
 			spec: JobSpec{
-				Type:      kube.PeriodicJob,
+				Type:      prowapi.PeriodicJob,
 				Job:       "job-name",
 				BuildID:   "0",
 				ProwJobID: "prowjob",
-				agent:     kube.KubernetesAgent,
+				agent:     prowapi.KubernetesAgent,
 			},
 			expected: map[string]string{
+				"CI":           "true",
 				"JOB_NAME":     "job-name",
 				"BUILD_ID":     "0",
 				"PROW_JOB_ID":  "prowjob",
 				"BUILD_NUMBER": "0",
 				"JOB_TYPE":     "periodic",
-				"JOB_SPEC":     `{"type":"periodic","job":"job-name","buildid":"0","prowjobid":"prowjob","refs":{}}`,
+				"JOB_SPEC":     `{"type":"periodic","job":"job-name","buildid":"0","prowjobid":"prowjob"}`,
 			},
 		},
 		{
 			name: "jenkins agent",
 			spec: JobSpec{
-				Type:      kube.PeriodicJob,
+				Type:      prowapi.PeriodicJob,
 				Job:       "job-name",
 				BuildID:   "0",
 				ProwJobID: "prowjob",
-				agent:     kube.JenkinsAgent,
+				agent:     prowapi.JenkinsAgent,
 			},
 			expected: map[string]string{
+				"CI":          "true",
 				"JOB_NAME":    "job-name",
 				"BUILD_ID":    "0",
 				"PROW_JOB_ID": "prowjob",
 				"JOB_TYPE":    "periodic",
-				"JOB_SPEC":    `{"type":"periodic","job":"job-name","buildid":"0","prowjobid":"prowjob","refs":{}}`,
+				"JOB_SPEC":    `{"type":"periodic","job":"job-name","buildid":"0","prowjobid":"prowjob"}`,
 			},
 		},
 	}
@@ -186,6 +192,67 @@ func TestEnvironmentForSpec(t *testing.T) {
 		}
 		if actual, expected := env, test.expected; !reflect.DeepEqual(actual, expected) {
 			t.Errorf("%s: got environment:\n\t%v\n\tbut expected:\n\t%v", test.name, actual, expected)
+		}
+	}
+}
+
+func TestGetRevisionFromSpec(t *testing.T) {
+	var tests = []struct {
+		name     string
+		spec     JobSpec
+		expected string
+	}{
+		{
+			name: "Refs with Pull",
+			spec: JobSpec{
+				Refs: &prowapi.Refs{
+					BaseRef: "master",
+					BaseSHA: "deadbeef",
+					Pulls: []prowapi.Pull{
+						{
+							Number: 123,
+							SHA:    "abcd1234",
+						},
+					},
+				},
+			},
+			expected: "abcd1234",
+		},
+		{
+			name: "Refs with BaseSHA",
+			spec: JobSpec{
+				Refs: &prowapi.Refs{
+					BaseRef: "master",
+					BaseSHA: "deadbeef",
+				},
+			},
+			expected: "deadbeef",
+		},
+		{
+			name: "Refs with BaseRef",
+			spec: JobSpec{
+				Refs: &prowapi.Refs{
+					BaseRef: "master",
+				},
+			},
+			expected: "master",
+		},
+		{
+			name: "Refs from extra_refs",
+			spec: JobSpec{
+				ExtraRefs: []prowapi.Refs{
+					{
+						BaseRef: "master",
+					},
+				},
+			},
+			expected: "master",
+		},
+	}
+
+	for _, test := range tests {
+		if actual, expected := GetRevisionFromSpec(&test.spec), test.expected; actual != expected {
+			t.Errorf("%s: got revision:%s but expected: %s", test.name, actual, expected)
 		}
 	}
 }

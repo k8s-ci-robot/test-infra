@@ -17,10 +17,12 @@ limitations under the License.
 package lifecycle
 
 import (
+	"fmt"
 	"regexp"
 
 	"github.com/sirupsen/logrus"
 
+	"k8s.io/test-infra/prow/config"
 	"k8s.io/test-infra/prow/github"
 	"k8s.io/test-infra/prow/labels"
 	"k8s.io/test-infra/prow/pluginhelp"
@@ -36,7 +38,7 @@ func init() {
 	plugins.RegisterGenericCommentHandler("lifecycle", lifecycleHandleGenericComment, help)
 }
 
-func help(config *plugins.Configuration, enabledRepos []string) (*pluginhelp.PluginHelp, error) {
+func help(config *plugins.Configuration, _ []config.OrgRepo) (*pluginhelp.PluginHelp, error) {
 	pluginHelp := &pluginhelp.PluginHelp{
 		Description: "Close, reopen, flag and/or unflag an issue or PR as frozen/stale/rotten",
 	}
@@ -68,6 +70,7 @@ type lifecycleClient interface {
 	AddLabel(owner, repo string, number int, label string) error
 	RemoveLabel(owner, repo string, number int, label string) error
 	GetIssueLabels(org, repo string, number int) ([]github.Label, error)
+	CreateComment(owner, repo string, number int, comment string) error
 }
 
 func lifecycleHandleGenericComment(pc plugins.Agent, e github.GenericCommentEvent) error {
@@ -100,10 +103,16 @@ func handleOne(gc lifecycleClient, log *logrus.Entry, e *github.GenericCommentEv
 	org := e.Repo.Owner.Login
 	repo := e.Repo.Name
 	number := e.Number
+	user := e.User.Login
 
 	remove := mat[1] != ""
 	cmd := mat[2]
 	lbl := "lifecycle/" + cmd
+
+	// Don't allow adding lifecycle/frozen label to PRs
+	if e.IsPR && lbl == labels.LifecycleFrozen && !remove {
+		return gc.CreateComment(org, repo, number, plugins.FormatResponseRaw(e.Body, e.HTMLURL, user, fmt.Sprintf("The `%s` label cannot be applied to Pull Requests.", labels.LifecycleFrozen)))
+	}
 
 	// Let's start simple and allow anyone to add/remove frozen, stale, rotten labels.
 	// Adjust if we find evidence of the community abusing these labels.
@@ -123,13 +132,13 @@ func handleOne(gc lifecycleClient, log *logrus.Entry, e *github.GenericCommentEv
 		for _, label := range lifecycleLabels {
 			if label != lbl && github.HasLabel(label, labels) {
 				if err := gc.RemoveLabel(org, repo, number, label); err != nil {
-					log.WithError(err).Errorf("Github failed to remove the following label: %s", label)
+					log.WithError(err).Errorf("GitHub failed to remove the following label: %s", label)
 				}
 			}
 		}
 
 		if err := gc.AddLabel(org, repo, number, lbl); err != nil {
-			log.WithError(err).Errorf("Github failed to add the following label: %s", lbl)
+			log.WithError(err).Errorf("GitHub failed to add the following label: %s", lbl)
 		}
 	}
 

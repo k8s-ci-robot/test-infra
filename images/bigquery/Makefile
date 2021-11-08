@@ -12,12 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-VERSION := $(shell date +v%Y%m%d)-$(shell git describe --tags --always --dirty)
+push-prod:
+  bazel run //images/builder -- --project=k8s-staging-test-infra --scratch-bucket=gs://k8s-staging-test-infra-gcb images/bigquery
 
-image:
-	docker build -t "gcr.io/k8s-testimages/bigquery:$(VERSION)" .
+push:
+	bazel run //images/builder -- --allow-dirty images/bigquery
 
-push: image
-	docker push "gcr.io/k8s-testimages/bigquery:$(VERSION)"
-
-.PHONY: image push
+.PHONY: push push-prod

@@ -103,7 +103,7 @@ func (fjr *FlakyJobReporter) parseFlakyJobs(jsonIn []byte) ([]*FlakyJob, error) 
 	var flakeMap map[string]*FlakyJob
 	err := json.Unmarshal(jsonIn, &flakeMap)
 	if err != nil || flakeMap == nil {
-		return nil, fmt.Errorf("error unmarshaling flaky jobs json: %v", err)
+		return nil, fmt.Errorf("error unmarshaling flaky jobs json: %w", err)
 	}
 	flakyJobs := make([]*FlakyJob, 0, len(flakeMap))
 
@@ -221,6 +221,9 @@ func (fj *FlakyJob) Body(closedIssues []*githubapi.Issue) string {
 	fmt.Fprintf(&buf, "\n%s", fj.reporter.creator.ExplainTestAssignments(testsSorted))
 
 	fmt.Fprintf(&buf, "\n[Flakiest Jobs](%s)\n", fj.reporter.flakyJobDataURL)
+
+	fmt.Fprintf(&buf, "\n/kind flake\n")
+
 	return buf.String()
 }
 
@@ -275,5 +278,5 @@ func ReadHTTP(url string) ([]byte, error) {
 		}
 		return body, nil
 	}
-	return nil, fmt.Errorf("ran out of retries reading from '%s'. Last error was %v", url, err)
+	return nil, fmt.Errorf("ran out of retries reading from '%s'. Last error was %w", url, err)
 }

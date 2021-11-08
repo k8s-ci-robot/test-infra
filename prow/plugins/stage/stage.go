@@ -23,6 +23,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 
+	"k8s.io/test-infra/prow/config"
 	"k8s.io/test-infra/prow/github"
 	"k8s.io/test-infra/prow/pluginhelp"
 	"k8s.io/test-infra/prow/plugins"
@@ -40,7 +41,7 @@ func init() {
 	plugins.RegisterGenericCommentHandler("stage", stageHandleGenericComment, help)
 }
 
-func help(config *plugins.Configuration, enabledRepos []string) (*pluginhelp.PluginHelp, error) {
+func help(config *plugins.Configuration, _ []config.OrgRepo) (*pluginhelp.PluginHelp, error) {
 	// The Config field is omitted because this plugin is not configurable.
 	pluginHelp := &pluginhelp.PluginHelp{
 		Description: "Label the stage of an issue as alpha/beta/stable",
@@ -106,13 +107,13 @@ func handleOne(gc stageClient, log *logrus.Entry, e *github.GenericCommentEvent,
 		for _, label := range stageLabels {
 			if label != lbl && github.HasLabel(label, labels) {
 				if err := gc.RemoveLabel(org, repo, number, label); err != nil {
-					log.WithError(err).Errorf("Github failed to remove the following label: %s", label)
+					log.WithError(err).Errorf("GitHub failed to remove the following label: %s", label)
 				}
 			}
 		}
 
 		if err := gc.AddLabel(org, repo, number, lbl); err != nil {
-			log.WithError(err).Errorf("Github failed to add the following label: %s", lbl)
+			log.WithError(err).Errorf("GitHub failed to add the following label: %s", lbl)
 		}
 	}
 

@@ -20,11 +20,11 @@ them when they have up-to-date passing test results ("tide goes out").
 - Supports blocking merge to individual branches or whole repos using specifically labelled GitHub issues.
 - Exposes Prometheus metrics.
 - Supports repos that have 'optional' status contexts that shouldn't be required for merge.
-- Serves live data about current actions and pools which can be consumed by [Deck](/prow/cmd/deck) to populate the Tide dashboard and the PR dashboard.
+- Serves live data about current pools and a history of actions which can be consumed by [Deck](/prow/cmd/deck) to populate the [Tide dashboard](https://prow.k8s.io/tide), the [PR dashboard](https://prow.k8s.io/pr), and the [Tide history page](https://prow.k8s.io/tide-history).
 - Scales efficiently so that a single instance with a single bot token can provide merge automation to dozens of orgs and repos with unique merge criteria. Every distinct 'org/repo:branch' combination defines a disjoint merge pool so that merges only affect other PRs in the same branch.
 - Provides configurable merge modes ('merge', 'squash', or 'rebase').
 
 
 ## History
 
-Tide was created in 2017 by @spxtr to replace [Mungegithub's](/mungegithub) Submit Queue.  It was designed to manage a large number of repositories across organizations without using many API rate limit tokens by identifying mergeable PRs with GitHub search queries fulfilled by GitHub's v4 GraphQL API.
+Tide was created in 2017 by @spxtr to replace `mungegithub`'s Submit Queue.  It was designed to manage a large number of repositories across organizations without using many API rate limit tokens by identifying mergeable PRs with GitHub search queries fulfilled by GitHub's v4 GraphQL API.

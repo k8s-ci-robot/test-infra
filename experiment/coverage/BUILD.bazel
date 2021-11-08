@@ -6,14 +6,15 @@ go_library(
     importpath = "k8s.io/test-infra/experiment/coverage",
     visibility = ["//visibility:private"],
     deps = [
-        "//vendor/github.com/go-openapi/spec:go_default_library",
-        "//vendor/github.com/golang/glog:go_default_library",
+        "@com_github_go_openapi_spec//:go_default_library",
+        "@com_github_golang_glog//:go_default_library",
     ],
 )
 
 go_binary(
     name = "coverage",
     embed = [":go_default_library"],
+    tags = ["manual"],
     visibility = ["//visibility:public"],
 )
 
@@ -35,4 +36,5 @@ go_test(
     name = "go_default_test",
     srcs = ["apicoverage_test.go"],
     embed = [":go_default_library"],
+    tags = ["manual"],
 )

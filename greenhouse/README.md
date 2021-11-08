@@ -3,8 +3,6 @@
 Greenhouse is our [bazel remote caching](https://docs.bazel.build/versions/master/remote-caching.html) setup.
 We use this to provide faster build & test presubmits with a Globally shared cache (per repo).
 
-We have a dashboard with metrics at: [velodrome.k8s.io/dashboard/db/bazel-cache](http://velodrome.k8s.io/dashboard/db/bazel-cache?orgId=1)
-
 Most Bazel users should probably visit [the official docs](https://docs.bazel.build/versions/master/remote-caching.html) and select one of the options outlined there, with Prow/Kubernetes we are using a custom setup to explore:
 
 - better support for multiple repos / cache invalidation by changing the cache URL suffix
@@ -37,3 +35,23 @@ We use this with [Prow](./../prow), to set it up we do the following:
 
 ## Optional Setup:
 - tweak `metrics-service.yaml` and point prometheus at this service to collect metrics
+
+## Cache Keying
+
+See [./../images/bootstrap/create_bazel_cache_rcs.sh](./../images/bootstrap/create_bazel_cache_rcs.sh)
+for our cache keying algorithm.
+
+In short:
+- we locate a number of host binaries known to be used by bazel (eg the
+system c compiler) within our image
+- we then lookup the package that owns each binary
+- from that we lookup the package's exact installed version
+- we use these in conjunction with the repo under test / built to compute a primary cache key
+
+This avoids [bazel#4558](https://github.com/bazelbuild/bazel/issues/4558).
+
+## Playbook
+
+For operational details on working with greenhouse, see [Greenhouse Playbook][greenhouse-playbook]
+
+[greenhouse-playbook]: /docs/playbooks/greenhouse.md

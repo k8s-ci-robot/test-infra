@@ -65,9 +65,7 @@ bazel run //label_sync -- \
   --action docs \
   --config $(pwd)/label_sync/labels.yaml \
   --docs-template $(pwd)/label_sync/labels.md.tmpl \
-  --docs-output $(pwd)/label_sync/labels.md \
-  --css-template $(pwd)/label_sync/labels.css.tmpl \
-  --css-output $(pwd)/prow/cmd/deck/static/labels.css
+  --docs-output $(pwd)/label_sync/labels.md
 ```
 
 ## Our Deployment
@@ -76,4 +74,4 @@ We run this as a [`CronJob`](./cluster/label_sync_cron_job.yaml) on a kubernetes
 
 These pods read [`labels.yaml`](./labels.yaml) from a ConfigMap that is updated by the [prow updateconfig plugin](/prow/plugins/updateconfig).
 
-To update the `labels.yaml` file, simply open a pull request against it.
+To update the `labels.yaml` file, make the desired changes to `labels.yaml` and run the `./hack/update-labels.sh` script. Then open a pull request with the resulting `labels.yaml` and `labels.md` files.

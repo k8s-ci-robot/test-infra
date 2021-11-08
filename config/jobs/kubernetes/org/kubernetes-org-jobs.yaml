@@ -3,19 +3,30 @@ presubmits:
   - name: pull-org-test-all
     always_run: true
     decorate: true
+    labels:
+      preset-service-account: "true"
     spec:
       containers:
-      - image: launcher.gcr.io/google/bazel
+      - image: golang:1.17
         command:
-        - bazel
+        - make
         args:
         - test
-        - //...
+    annotations:
+      testgrid-num-columns-recent: '30'
+      testgrid-create-test-group: 'true'
   - name: pull-org-verify-all
     always_run: true
     decorate: true
+    labels:
+      preset-service-account: "true"
     spec:
       containers:
-      - image: launcher.gcr.io/google/bazel
+      - image: golang:1.17
         command:
-        - ./hack/verify-all.sh
+        - make
+        args:
+        - verify
+    annotations:
+      testgrid-num-columns-recent: '30'
+      testgrid-create-test-group: 'true'

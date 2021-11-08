@@ -1,7 +1,16 @@
 # See the OWNERS docs at https://go.k8s.io/owners
 
-approvers:
-- rmmh
+reviewers:
+- MushuEE
+- spiffxp
 - stevekuznetsov
+approvers:
+- spiffxp
+- stevekuznetsov
+emeritus_approvers:
+- ibzib
+- Katharine
+- rmmh
+
 labels:
 - area/gubernator

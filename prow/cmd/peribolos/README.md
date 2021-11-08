@@ -1,8 +1,10 @@
 # Peribolos Documentation
 
-Peribolos allows the org settings, teams and memberships to be declared in a yaml file. Github is then updated to match the declared configuration.
+Peribolos allows the org settings, teams and memberships to be declared in a yaml file. GitHub is then updated to match the declared configuration.
 
 See the [kubernetes/org] repo, in particular the [merge] and [`update.sh`] parts of that repo for this tool in action.
+
+Peribolos was the subject of a KubeCon talk: [How Kubernetes Uses GitOps to Manage GitHub Communities at Scale][kubecon talk]
 
 ### Etymology
 
@@ -46,6 +48,9 @@ orgs:
         - anne
         maintainers:
         - jane
+        repos: # Ensure the team has the following permissions levels on repos in the org
+          some-repo: admin
+          other-repo: read
       another-team:
         ...
       ...
@@ -66,6 +71,7 @@ This config will:
   - Rename the backend team to node
   - Add anne as a member and jane as a maintainer to node
   - Similar things for another-team (details elided)
+* Ensure that the team has admin rights to `some-repo`, read access to `other-repo` and no other privileges
 
 Note that any fields missing from the config will not be managed by peribolos. So if description is missing from the org setting, the current value will remain.
 
@@ -77,16 +83,9 @@ Peribolos can dump the current configuration to an org. For example you could du
 
 ```console
 $ bazel run //prow/cmd/peribolos -- --dump kubernetes-sigs --github-token-path ~/github-token | tee ~/current.yaml # --tokens=0 to disable throttling
-INFO: Analysed target //prow/cmd/peribolos:peribolos (0 packages loaded).
-INFO: Found 1 target...
-Target //prow/cmd/peribolos:peribolos up-to-date:
-  bazel-bin/prow/cmd/peribolos/darwin_amd64_pure_stripped/peribolos
-INFO: Elapsed time: 0.533s, Critical Path: 0.18s
-INFO: 0 processes.
+...
 INFO: Build completed successfully, 1 total action
-INFO: Running command line: bazel-bin/prow/cmd/peribolos/darwin_amd64_pure_stripped/peribolos --dump kubernetes-sigs
-INFO: Build completed successfully, 1 total action
-{"client":"github","component":"peribolos","level":"info","msg":"Throttle(300, 100)","time":"2018-09-28T13:17:42-07:00"}
+...
 {"client":"github","component":"peribolos","level":"info","msg":"GetOrg(kubernetes-sigs)","time":"2018-09-28T13:17:42-07:00"}
 {"client":"github","component":"peribolos","level":"info","msg":"ListOrgMembers(kubernetes-sigs, admin)","time":"2018-09-28T13:17:42-07:00"}
 {"client":"github","component":"peribolos","level":"info","msg":"ListOrgMembers(kubernetes-sigs, member)","time":"2018-09-28T13:17:43-07:00"}
@@ -155,7 +154,7 @@ In order to mitigate the chance of applying erroneous configs, the peribolos bin
 
 These flags are designed to ensure that any problems can be corrected by rerunning the tool with a fixed config and/or binary.
 
-* `--maximimum-removal-delta=0.25` - reject a config that deletes more than 25% of the current memberships.
+* `--maximum-removal-delta=0.25` - reject a config that deletes more than 25% of the current memberships.
 
 This flag is designed to protect against typos in the configuration which might cause massive, unwanted deletions. Raising this value to 1.0 will allow deleting everyone, and reducing it to 0.0 will prevent any deletions.
 
@@ -166,7 +165,7 @@ See `bazel run //prow/cmd/peribolos -- --help` for the full and current list of 
 
 
 
-[`config.yaml`]: /prow/config.yaml
+[`config.yaml`]: /config/prow/config.yaml
 [edit team]: https://developer.github.com/v3/teams/#edit-team
 [edit org]: https://developer.github.com/v3/orgs/#edit-an-organization
 [peribolos]: https://en.wikipedia.org/wiki/Peribolos
@@ -175,3 +174,4 @@ See `bazel run //prow/cmd/peribolos -- --help` for the full and current list of 
 [merge]: https://github.com/kubernetes/org/tree/master/cmd/merge
 [kubernetes/org]: https://github.com/kubernetes/org
 [`update.sh`]: https://github.com/kubernetes/org/blob/master/admin/update.sh
+[kubecon talk]: https://www.youtube.com/watch?v=te3Xj2zr1Co

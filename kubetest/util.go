@@ -33,7 +33,34 @@ var httpTransport *http.Transport
 
 func init() {
 	httpTransport = new(http.Transport)
+	httpTransport.Proxy = http.ProxyFromEnvironment
 	httpTransport.RegisterProtocol("file", http.NewFileTransport(http.Dir("/")))
+}
+
+// Essentially curl url | writer including request headers
+func httpReadWithHeaders(url string, headers map[string]string, writer io.Writer) error {
+	log.Printf("curl %s", url)
+	c := &http.Client{Transport: httpTransport}
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return err
+	}
+	for k, v := range headers {
+		req.Header.Add(k, v)
+	}
+	r, err := c.Do(req)
+	if err != nil {
+		return err
+	}
+	defer r.Body.Close()
+	if r.StatusCode >= 400 {
+		return fmt.Errorf("%v returned %d", url, r.StatusCode)
+	}
+	_, err = io.Copy(writer, r.Body)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 // Essentially curl url | writer
@@ -64,7 +91,7 @@ type instanceGroup struct {
 func getLatestClusterUpTime(gcloudJSON string) (time.Time, error) {
 	igs := []instanceGroup{}
 	if err := json.Unmarshal([]byte(gcloudJSON), &igs); err != nil {
-		return time.Time{}, fmt.Errorf("error when unmarshal json: %v", err)
+		return time.Time{}, fmt.Errorf("error when unmarshal json: %w", err)
 	}
 
 	latest := time.Time{}
@@ -72,7 +99,7 @@ func getLatestClusterUpTime(gcloudJSON string) (time.Time, error) {
 	for _, ig := range igs {
 		created, err := time.Parse(time.RFC3339, ig.CreationTimestamp)
 		if err != nil {
-			return time.Time{}, fmt.Errorf("error when parse time from %s: %v", ig.CreationTimestamp, err)
+			return time.Time{}, fmt.Errorf("error when parse time from %s: %w", ig.CreationTimestamp, err)
 		}
 
 		if created.After(latest) {
@@ -126,12 +153,82 @@ func getLatestGKEVersion(project, zone, region, releasePrefix string) (string, e
 	return "v" + latestValid, nil
 }
 
+// (only works on gke)
+// getChannelGKEVersion will return master version from a GKE release channel.
+func getChannelGKEVersion(project, zone, region, gkeChannel string) (string, error) {
+	cmd := []string{
+		"container",
+		"get-server-config",
+		fmt.Sprintf("--project=%v", project),
+		"--format=json(channels)",
+	}
+
+	/*
+		sample output:
+		{
+		  "channels": [
+		    {
+		      "channel": "RAPID",
+		      "defaultVersion": "1.14.3-gke.9"
+		    },
+		    {
+		      "channel": "REGULAR",
+		      "defaultVersion": "1.12.8-gke.10"
+		    },
+		    {
+		      "channel": "STABLE",
+		      "defaultVersion": "1.12.8-gke.10"
+		    }
+		  ]
+		}
+	*/
+
+	type channel struct {
+		Channel        string `json:"channel"`
+		DefaultVersion string `json:"defaultVersion"`
+	}
+
+	type channels struct {
+		Channels []channel `json:"channels"`
+	}
+
+	// --gkeCommandGroup is from gke.go
+	if *gkeCommandGroup != "" {
+		cmd = append([]string{*gkeCommandGroup}, cmd...)
+	}
+
+	// zone can be empty for regional cluster
+	if zone != "" {
+		cmd = append(cmd, fmt.Sprintf("--zone=%v", zone))
+	} else if region != "" {
+		cmd = append(cmd, fmt.Sprintf("--region=%v", region))
+	}
+
+	res, err := control.Output(exec.Command("gcloud", cmd...))
+	if err != nil {
+		return "", err
+	}
+
+	var c channels
+	if err := json.Unmarshal(res, &c); err != nil {
+		return "", err
+	}
+
+	for _, channel := range c.Channels {
+		if strings.EqualFold(channel.Channel, gkeChannel) {
+			return "v" + channel.DefaultVersion, nil
+		}
+	}
+
+	return "", fmt.Errorf("cannot find a valid version for channel %s", gkeChannel)
+}
+
 // gcsWrite uploads contents to the dest location in GCS.
 // It currently shells out to gsutil, but this could change in future.
 func gcsWrite(dest string, contents []byte) error {
 	f, err := ioutil.TempFile("", "")
 	if err != nil {
-		return fmt.Errorf("error creating temp file: %v", err)
+		return fmt.Errorf("error creating temp file: %w", err)
 	}
 
 	defer func() {
@@ -141,12 +238,35 @@ func gcsWrite(dest string, contents []byte) error {
 	}()
 
 	if _, err := f.Write(contents); err != nil {
-		return fmt.Errorf("error writing temp file: %v", err)
+		return fmt.Errorf("error writing temp file: %w", err)
 	}
 
 	if err := f.Close(); err != nil {
-		return fmt.Errorf("error closing temp file: %v", err)
+		return fmt.Errorf("error closing temp file: %w", err)
 	}
 
 	return control.FinishRunning(exec.Command("gsutil", "cp", f.Name(), dest))
+}
+
+func setKubeShhBastionEnv(gcpProject, gcpZone, sshProxyInstanceName string) error {
+	value, err := control.Output(exec.Command(
+		"gcloud", "compute", "instances", "describe",
+		sshProxyInstanceName,
+		"--project="+gcpProject,
+		"--zone="+gcpZone,
+		"--format=get(networkInterfaces[0].accessConfigs[0].natIP)"))
+	if err != nil {
+		return fmt.Errorf("failed to get the external IP address of the '%s' instance: %w",
+			sshProxyInstanceName, err)
+	}
+	address := strings.TrimSpace(string(value))
+	if address == "" {
+		return fmt.Errorf("instance '%s' doesn't have an external IP address", sshProxyInstanceName)
+	}
+	address += ":22"
+	if err := os.Setenv("KUBE_SSH_BASTION", address); err != nil {
+		return err
+	}
+	log.Printf("KUBE_SSH_BASTION set to: %v\n", address)
+	return nil
 }

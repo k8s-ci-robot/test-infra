@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Copyright 2016 The Kubernetes Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,9 +20,9 @@ pylint ../gubernator
 shopt -s extglob
 status=0
 for f in templates/!(base).html; do
-  if ! grep -q "% extends 'base.html'" "$f"; then
+  if ! grep -q "% extends 'base.html'" "${f}"; then
     status=1
-    echo "ERROR: $f should begin with '% extends 'base.html'"
+    echo "ERROR: ${f} should begin with '% extends 'base.html'"
   fi
 done
-exit $status
+exit ${status}

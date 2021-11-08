@@ -1,4 +1,26 @@
-approvers:
-- PatrickLang
+# See the OWNERS docs at https://go.k8s.io/owners
+
+reviewers:
 - adelina-t
-- bclau
+- andyzhangx
+- chewong
+- claudiubelu
+- ddebroy
+- feiskyer
+- jayunit100
+- jsturtevant
+- marosset
+approvers:
+- adelina-t
+- andyzhangx
+- benmoss
+- chewong
+- claudiubelu
+- ddebroy
+- feiskyer
+- jayunit100
+- jsturtevant
+- marosset
+
+labels:
+- sig/windows

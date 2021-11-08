@@ -71,7 +71,7 @@ func TestGroupLines(t *testing.T) {
 			name: "Test skip none",
 			lines: []string{
 				"a", "b", "c", "d", "e",
-				"Failed to immanentize the eschaton.",
+				"ERROR: Failed to immanentize the eschaton.",
 				"a", "b", "c", "d", "e",
 			},
 			groups: []LineGroup{
@@ -80,7 +80,7 @@ func TestGroupLines(t *testing.T) {
 					End:        11,
 					Skip:       false,
 					ByteOffset: 0,
-					ByteLength: 55,
+					ByteLength: 62,
 				},
 			},
 		},
@@ -88,7 +88,7 @@ func TestGroupLines(t *testing.T) {
 			name: "Test skip threshold",
 			lines: []string{
 				"a", "b", "c", "d", // skip threshold unmet
-				"a", "b", "c", "d", "e", "Failed to immanentize the eschaton.", "a", "b", "c", "d", "e",
+				"a", "b", "c", "d", "e", "ERROR: Failed to immanentize the eschaton.", "a", "b", "c", "d", "e",
 				"a", "b", "c", "d", "e", // skip threshold met
 			},
 			groups: []LineGroup{
@@ -104,13 +104,13 @@ func TestGroupLines(t *testing.T) {
 					End:        15,
 					Skip:       false,
 					ByteOffset: 8,
-					ByteLength: 55,
+					ByteLength: 62,
 				},
 				{
 					Start:      15,
 					End:        20,
 					Skip:       true,
-					ByteOffset: 64,
+					ByteOffset: 71,
 					ByteLength: 9,
 				},
 			},
@@ -172,7 +172,7 @@ func TestGroupLines(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got := groupLines(highlightLines(test.lines, 0))
+			got := groupLines(highlightLines(test.lines, 0, "", defaultErrRE))
 			if len(got) != len(test.groups) {
 				t.Fatalf("Expected %d groups, got %d", len(test.groups), len(got))
 			}
@@ -192,4 +192,20 @@ func TestGroupLines(t *testing.T) {
 			}
 		})
 	}
+}
+
+func BenchmarkHighlightLines(b *testing.B) {
+	lorem := []string{
+		"Lorem ipsum dolor sit amet",
+		"consectetur adipiscing elit",
+		"sed do eiusmod tempor incididunt ut labore et dolore magna aliqua",
+		"Ut enim ad minim veniam",
+		"quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat",
+		"Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur",
+		"Excepteur sint occaecat cupidatat non proident",
+		"sunt in culpa qui officia deserunt mollit anim id est laborum",
+	}
+	b.Run("HighlightLines", func(b *testing.B) {
+		_ = highlightLines(lorem, 0, "artifact", defaultErrRE)
+	})
 }

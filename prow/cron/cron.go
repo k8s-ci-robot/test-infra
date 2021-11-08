@@ -23,7 +23,9 @@ import (
 	"sync"
 
 	"github.com/sirupsen/logrus"
-	"gopkg.in/robfig/cron.v2" // using v2 api, doc at https://godoc.org/gopkg.in/robfig/cron.v2
+	cron "gopkg.in/robfig/cron.v2" // using v2 api, doc at https://godoc.org/gopkg.in/robfig/cron.v2
+	utilerrors "k8s.io/apimachinery/pkg/util/errors"
+	"k8s.io/apimachinery/pkg/util/sets"
 
 	"k8s.io/test-infra/prow/config"
 )
@@ -94,18 +96,24 @@ func (c *Cron) SyncConfig(cfg *config.Config) error {
 		}
 	}
 
-	exist := map[string]bool{}
+	periodicNames := sets.NewString()
 	for _, p := range cfg.AllPeriodics() {
-		exist[p.Name] = true
+		periodicNames.Insert(p.Name)
 	}
 
+	existing := sets.NewString()
 	for k := range c.jobs {
-		if _, ok := exist[k]; !ok {
-			defer c.removeJob(k)
+		existing.Insert(k)
+	}
+
+	var removalErrors []error
+	for _, job := range existing.Difference(periodicNames).List() {
+		if err := c.removeJob(job); err != nil {
+			removalErrors = append(removalErrors, err)
 		}
 	}
 
-	return nil
+	return utilerrors.NewAggregate(removalErrors)
 }
 
 // HasJob returns if a job has been scheduled in cronAgent or not
@@ -136,12 +144,6 @@ func (c *Cron) addPeriodic(p config.Periodic) error {
 		return err
 	}
 
-	for _, ras := range p.RunAfterSuccess {
-		if err := c.addPeriodic(ras); err != nil {
-			return err
-		}
-	}
-
 	return nil
 }
 
@@ -156,7 +158,7 @@ func (c *Cron) addJob(name, cron string) error {
 	})
 
 	if err != nil {
-		return fmt.Errorf("cronAgent fails to add job %s with cron %s: %v", name, cron, err)
+		return fmt.Errorf("cronAgent fails to add job %s with cron %s: %w", name, cron, err)
 	}
 
 	c.jobs[name] = &jobStatus{

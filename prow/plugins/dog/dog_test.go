@@ -102,6 +102,9 @@ func TestHttpResponse(t *testing.T) {
 	contentLength["/dog.jpg"] = "717987"
 	contentLength["/doggo.mp4"] = "37943259"
 	contentLength["/bigdog.jpg"] = "12647753"
+	contentLength["/this_is_fine.png"] = "317624"
+	contentLength["/this_is_not_fine.png"] = "645595"
+	contentLength["/this_is_unbearable.jpg"] = "34241"
 
 	// fake server for images
 	ts2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -218,9 +221,8 @@ func TestHttpResponse(t *testing.T) {
 		}
 
 		// github fake client
-		fc := &fakegithub.FakeClient{
-			IssueComments: make(map[int][]github.IssueComment),
-		}
+		fc := fakegithub.NewFakeClient()
+		fc.IssueComments = make(map[int][]github.IssueComment)
 
 		// fully test handling a comment
 		e := &github.GenericCommentEvent{
@@ -229,7 +231,7 @@ func TestHttpResponse(t *testing.T) {
 			Number:     5,
 			IssueState: "open",
 		}
-		err = handle(fc, logrus.WithField("plugin", pluginName), e, realPack(ts.URL))
+		err = handle(fc, logrus.WithField("plugin", pluginName), e, realPack(ts.URL), ts2.URL+"/")
 		if err != nil {
 			t.Errorf("tc %s: For comment %s, didn't expect error: %v", testcase.name, testcase.comment, err)
 		}
@@ -322,9 +324,8 @@ func TestDogs(t *testing.T) {
 		},
 	}
 	for _, tc := range testcases {
-		fc := &fakegithub.FakeClient{
-			IssueComments: make(map[int][]github.IssueComment),
-		}
+		fc := fakegithub.NewFakeClient()
+		fc.IssueComments = make(map[int][]github.IssueComment)
 		e := &github.GenericCommentEvent{
 			Action:     tc.action,
 			Body:       tc.body,
@@ -332,7 +333,7 @@ func TestDogs(t *testing.T) {
 			IssueState: tc.state,
 			IsPR:       tc.pr,
 		}
-		err := handle(fc, logrus.WithField("plugin", pluginName), e, fakePack("doge"))
+		err := handle(fc, logrus.WithField("plugin", pluginName), e, fakePack("doge"), "")
 		if err != nil {
 			t.Errorf("For case %s, didn't expect error: %v", tc.name, err)
 		}

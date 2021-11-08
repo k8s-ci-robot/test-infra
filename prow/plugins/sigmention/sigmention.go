@@ -25,6 +25,7 @@ import (
 	"strings"
 
 	"github.com/sirupsen/logrus"
+	"k8s.io/test-infra/prow/config"
 	"k8s.io/test-infra/prow/github"
 	"k8s.io/test-infra/prow/labels"
 	"k8s.io/test-infra/prow/pluginhelp"
@@ -50,7 +51,7 @@ type githubClient interface {
 	AddLabel(owner, repo string, number int, label string) error
 	RemoveLabel(owner, repo string, number int, label string) error
 	GetRepoLabels(owner, repo string) ([]github.Label, error)
-	BotName() (string, error)
+	BotUserChecker() (func(candidate string) bool, error)
 	GetIssueLabels(org, repo string, number int) ([]github.Label, error)
 }
 
@@ -58,15 +59,23 @@ func init() {
 	plugins.RegisterGenericCommentHandler(pluginName, handleGenericComment, helpProvider)
 }
 
-func helpProvider(config *plugins.Configuration, enabledRepos []string) (*pluginhelp.PluginHelp, error) {
-	// Only the Description field is specified because this plugin is not triggered with commands and is not configurable.
+func helpProvider(config *plugins.Configuration, _ []config.OrgRepo) (*pluginhelp.PluginHelp, error) {
+	yamlSnippet, err := plugins.CommentMap.GenYaml(&plugins.Configuration{
+		SigMention: plugins.SigMention{
+			Regexp: "(?m)@kubernetes/sig-([\\w-]*)-(misc|test-failures|bugs|feature-requests|proposals|pr-reviews|api-reviews)",
+		},
+	})
+	if err != nil {
+		logrus.WithError(err).Warnf("cannot generate comments for %s plugin", pluginName)
+	}
 	return &pluginhelp.PluginHelp{
-			Description: `The sigmention plugin responds to SIG (Special Interest Group) Github team mentions like '@kubernetes/sig-testing-bugs'. The plugin responds in two ways:
+			Description: `The sigmention plugin responds to SIG (Special Interest Group) GitHub team mentions like '@kubernetes/sig-testing-bugs'. The plugin responds in two ways:
 <ol><li> The appropriate 'sig/*' and 'kind/*' labels are applied to the issue or pull request. In this case 'sig/testing' and 'kind/bug'.</li>
-<li> If the user who mentioned the Github team is not a member of the organization that owns the repository the bot will create a comment that repeats the mention. This is necessary because non-member mentions do not trigger Github notifications.</li></ol>`,
+<li> If the user who mentioned the GitHub team is not a member of the organization that owns the repository the bot will create a comment that repeats the mention. This is necessary because non-member mentions do not trigger GitHub notifications.</li></ol>`,
 			Config: map[string]string{
-				"": fmt.Sprintf("Labels added by the plugin are triggered by mentions of Github teams matching the following regexp:\n%s", config.SigMention.Regexp),
+				"": fmt.Sprintf("Labels added by the plugin are triggered by mentions of GitHub teams matching the following regexp:\n%s", config.SigMention.Regexp),
 			},
+			Snippet: yamlSnippet,
 		},
 		nil
 }
@@ -77,11 +86,11 @@ func handleGenericComment(pc plugins.Agent, e github.GenericCommentEvent) error 
 
 func handle(gc githubClient, log *logrus.Entry, e *github.GenericCommentEvent, re *regexp.Regexp) error {
 	// Ignore bot comments and comments that aren't new.
-	botName, err := gc.BotName()
+	botUserChecker, err := gc.BotUserChecker()
 	if err != nil {
 		return err
 	}
-	if e.User.Login == botName {
+	if botUserChecker(e.User.Login) {
 		return nil
 	}
 	if e.Action != github.GenericCommentActionCreated {
@@ -119,14 +128,14 @@ func handle(gc githubClient, log *logrus.Entry, e *github.GenericCommentEvent, r
 		}
 		if !github.HasLabel(sigLabel, labels) {
 			if err := gc.AddLabel(org, repo, e.Number, sigLabel); err != nil {
-				log.WithError(err).Errorf("Github failed to add the following label: %s", sigLabel)
+				log.WithError(err).Errorf("GitHub failed to add the following label: %s", sigLabel)
 			}
 		}
 
 		if len(sigMatch) > 2 {
 			if kindLabel, ok := kindMap[sigMatch[2]]; ok && !github.HasLabel(kindLabel, labels) {
 				if err := gc.AddLabel(org, repo, e.Number, kindLabel); err != nil {
-					log.WithError(err).Errorf("Github failed to add the following label: %s", kindLabel)
+					log.WithError(err).Errorf("GitHub failed to add the following label: %s", kindLabel)
 				}
 			}
 		}

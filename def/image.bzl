@@ -30,10 +30,28 @@
 #     "foo:latest-fejta": "//bar",
 #     "foo:20180203-deadbeef", "//bar",
 #   }
-def tags(**names):
-  outs = {}
-  for img, target in names.items():
-    outs['%s:{DOCKER_TAG}' % img] = target
-    outs['%s:latest-{BUILD_USER}' % img] = target
-    outs['%s:latest' % img] = target
-  return outs
+def tags(targets):
+    outs = {}
+    for img, target in targets.items():
+        outs["%s:{DOCKER_TAG}" % img] = target
+        outs["%s:latest-{BUILD_USER}" % img] = target
+        outs["%s:latest" % img] = target
+    return outs
+
+def tags_arm64(targets):
+    outs = {}
+    for img, target in targets.items():
+        outs["%s:{DOCKER_TAG}-arm64" % img] = target
+        outs["%s:latest-{BUILD_USER}-arm64" % img] = target
+        outs["%s:latest-arm64" % img] = target
+        outs["%s:arm64" % img] = target
+    return outs
+
+def tags_ppc64le(targets):
+    outs = {}
+    for img, target in targets.items():
+        outs["%s:{DOCKER_TAG}-ppc64le" % img] = target
+        outs["%s:latest-{BUILD_USER}-ppc64le" % img] = target
+        outs["%s:latest-ppc64le" % img] = target
+        outs["%s:ppc64le" % img] = target
+    return outs

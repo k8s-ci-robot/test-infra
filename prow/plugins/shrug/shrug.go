@@ -22,6 +22,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 
+	"k8s.io/test-infra/prow/config"
 	"k8s.io/test-infra/prow/github"
 	"k8s.io/test-infra/prow/labels"
 	"k8s.io/test-infra/prow/pluginhelp"
@@ -35,23 +36,11 @@ var (
 	unshrugRe = regexp.MustCompile(`(?mi)^/unshrug\s*$`)
 )
 
-type event struct {
-	org           string
-	repo          string
-	number        int
-	prAuthor      string
-	commentAuthor string
-	body          string
-	assignees     []github.User
-	hasLabel      func(label string) (bool, error)
-	htmlurl       string
-}
-
 func init() {
 	plugins.RegisterGenericCommentHandler(pluginName, handleGenericComment, helpProvider)
 }
 
-func helpProvider(config *plugins.Configuration, enabledRepos []string) (*pluginhelp.PluginHelp, error) {
+func helpProvider(config *plugins.Configuration, _ []config.OrgRepo) (*pluginhelp.PluginHelp, error) {
 	// The Config field is omitted because this plugin is not configurable.
 	pluginHelp := &pluginhelp.PluginHelp{
 		Description: labels.Shrug,
@@ -111,7 +100,7 @@ func handle(gc githubClient, log *logrus.Entry, e *github.GenericCommentEvent) e
 		resp := "¯\\\\\\_(ツ)\\_/¯"
 		log.Infof("Commenting with \"%s\".", resp)
 		if err := gc.CreateComment(org, repo, e.Number, plugins.FormatResponseRaw(e.Body, e.HTMLURL, e.User.Login, resp)); err != nil {
-			return fmt.Errorf("failed to comment on %s/%s#%d: %v", org, repo, e.Number, err)
+			return fmt.Errorf("failed to comment on %s/%s#%d: %w", org, repo, e.Number, err)
 		}
 		return gc.RemoveLabel(org, repo, e.Number, labels.Shrug)
 	} else if !hasShrug && wantShrug {

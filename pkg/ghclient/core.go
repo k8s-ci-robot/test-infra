@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/golang/glog"
@@ -47,6 +49,19 @@ type Client struct {
 
 // NewClient makes a new Client with the specified token and dry-run status.
 func NewClient(token string, dryRun bool) *Client {
+	return NewClientWithEndpoint("https://api.github.com", token, dryRun)
+}
+
+// NewClientWithEndpoint makes a new Client with the provided endpoint.
+func NewClientWithEndpoint(endpoint string, token string, dryRun bool) *Client {
+	baseURL, err := url.Parse(endpoint)
+	if err != nil {
+		glog.Fatalf("invalid github endpoint %s: %s", endpoint, err)
+	}
+	if !strings.HasSuffix(baseURL.Path, "/") {
+		baseURL.Path += "/"
+	}
+
 	httpClient := &http.Client{
 		Transport: &oauth2.Transport{
 			Base:   http.DefaultTransport,
@@ -54,6 +69,8 @@ func NewClient(token string, dryRun bool) *Client {
 		},
 	}
 	client := github.NewClient(httpClient)
+	client.BaseURL = baseURL
+
 	return &Client{
 		issueService:        client.Issues,
 		prService:           client.PullRequests,
@@ -136,7 +153,7 @@ func (c *Client) depaginate(action string, opts *github.ListOptions, call func()
 	for ; opts.Page <= lastPage; opts.Page++ {
 		resp, err := c.retry(action, wrapper)
 		if err != nil {
-			return allItems, fmt.Errorf("error while depaginating page %d/%d: %v", opts.Page, lastPage, err)
+			return allItems, fmt.Errorf("error while depaginating page %d/%d: %w", opts.Page, lastPage, err)
 		}
 		if resp.LastPage > 0 {
 			lastPage = resp.LastPage

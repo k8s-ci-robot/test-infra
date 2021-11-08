@@ -1,119 +1,165 @@
 periodics:
 - name: ci-test-infra-bazel
+  decorate: true
+  extra_refs:
+  - org: kubernetes
+    repo: test-infra
+    base_ref: master
   interval: 1h
   labels:
     preset-service-account: "true"
     preset-bazel-scratch-dir: "true"
-    preset-bazel-remote-cache-enabled: "true"
   spec:
     containers:
-    - image: gcr.io/k8s-testimages/kubekins-e2e:v20181129-33929460d-experimental
-      args:
-      - "--job=$(JOB_NAME)"
-      - "--repo=k8s.io/test-infra=master"
-      - "--service-account=/etc/service-account/service-account.json"
-      - "--upload=gs://kubernetes-jenkins/logs"
-      - "--scenario=kubernetes_bazel"
-      - "--" # end bootstrap args, scenario args below
-      - "--build=//..."
-      - "--install=gubernator/test_requirements.txt"
-      - "--test=//..."
-      - "--test-args=--test_output=errors"
-      # Bazel needs privileged mode in order to sandbox builds.
-      securityContext:
-        privileged: true
-      resources:
-        requests:
-          memory: "2Gi"
-
-- name: ci-test-infra-triage
-  decorate: true
-  interval: 20m
-  spec:
-    containers:
-    - image: gcr.io/k8s-testimages/triage:latest
-      imagePullPolicy: Always
-      env:
-      - name: GOOGLE_APPLICATION_CREDENTIALS
-        value: /etc/service-account/service-account.json
+    - image: gcr.io/k8s-testimages/launcher.gcr.io/google/bazel:v20210806-38e1be0-test-infra
       command:
-        - "timeout"
+      - hack/bazel.sh
       args:
-        - "-t"
-        - "10800"
-        - "/update_summaries.sh"
-      volumeMounts:
-      - name: service
-        mountPath: /etc/service-account
-        readOnly: true
-    volumes:
-    - name: service
-      secret:
-        secretName: triage-service-account
-
-- name: metrics-bigquery
-  interval: 24h
-  spec:
-    containers:
-    - image: gcr.io/k8s-testimages/bigquery:v20180330-f723e8d3f
-      args:
-      - --scenario=execute
-      - --
-      - test-infra/metrics/bigquery.py
-      - --
-      - --bucket=gs://k8s-metrics
-      - --backfill-days=90
+      - test
+      - --config=ci
+      - --nobuild_tests_only
+      - //...
       env:
-      - name: GOOGLE_APPLICATION_CREDENTIALS
-        value: /etc/service-account/service-account.json
-      - name: VELODROME_INFLUXDB_CONFIG
-        value: /etc/velodrome-influxdb/config.json
-      volumeMounts:
-      - name: service
-        mountPath: /etc/service-account
-        readOnly: true
-      - name: influxdb
-        mountPath: /etc/velodrome-influxdb
-        readOnly: true
-    volumes:
-    - name: service
-      secret:
-        secretName: triage-service-account
-    - name: influxdb
-      secret:
-        secretName: velodrome-influxdb
+      - name: BAZEL_FETCH_PLEASE
+        value: //...
+  annotations:
+    testgrid-dashboards: sig-testing-misc
+    testgrid-tab-name: ci-bazel
+    description: Runs bazel test //... on the test-infra repo every hour
 
 - name: metrics-kettle
   interval: 1h
+  decorate: true
+  extra_refs:
+  - org: kubernetes
+    repo: test-infra
+    base_ref: master
   spec:
+    serviceAccountName: triage
     containers:
-    - image: gcr.io/k8s-testimages/bigquery:v20180330-f723e8d3f
+    - image: gcr.io/k8s-staging-test-infra/bigquery:v20211001-c920b4c552
       args:
-      - --scenario=execute
-      - --
-      - test-infra/kettle/monitor.py
-      - --
+      - ./kettle/monitor.py
       - --stale=6
       - --table
       - k8s-gubernator:build.all
       - k8s-gubernator:build.week
       - k8s-gubernator:build.day
+  annotations:
+    testgrid-num-failures-to-alert: '6'
+    testgrid-alert-stale-results-hours: '12'
+    testgrid-dashboards: sig-testing-misc
+    testgrid-alert-email: kubernetes-sig-testing-alerts@googlegroups.com, k8s-infra-oncall@google.com
+    description: Monitors Kettle's BigQuery database freshness.
+
+- name: test-infra-fuzz
+  labels:
+    preset-dind-enabled: "true"
+  decorate: true
+  extra_refs:
+  - org: kubernetes
+    repo: test-infra
+    base_ref: master
+  interval: 1h
+  spec:
+    serviceAccountName: fuzz-test
+    containers:
+      #TODO(mpherman) : Change to versioned once stable
+    - image: gcr.io/k8s-testimages/ci_fuzz:latest
+      command:
+        - runner.sh
+      args:
+        - python3
+        - "/opt/oss-fuzz/infra/cifuzz/cifuzz_combined_entrypoint.py"
+      # docker-in-docker needs privileged mode
+      securityContext:
+        privileged: true
       env:
-      - name: GOOGLE_APPLICATION_CREDENTIALS
-        value: /etc/service-account/service-account.json
-      - name: VELODROME_INFLUXDB_CONFIG
-        value: /etc/velodrome-influxdb/config.json
-      volumeMounts:
-      - name: service
-        mountPath: /etc/service-account
-        readOnly: true
-      - name: influxdb
-        mountPath: /etc/velodrome-influxdb
-        readOnly: true
-    volumes:
-    - name: service
-      secret:
-        secretName: triage-service-account
-    - name: influxdb
-      secret:
-        secretName: velodrome-influxdb
+      - name: MODE
+        value: batch
+      - name: REPO_NAME
+        value: test-infra
+      - name: SANITIZER
+        value: 'address'
+      - name: CLOUD_BUCKET
+        value: gs://prow-cifuzz-test/
+      - name: CFL_PLATFORM
+        value: prow
+  annotations:
+    testgrid-dashboards: sig-testing-misc
+    testgrid-tab-name: test-infra-fuzz
+    description: Runs clusterfuzzlite every hour
+
+- name: test-infra-cfl-coverage-report
+  labels:
+    preset-dind-enabled: "true"
+  decorate: true
+  extra_refs:
+  - org: kubernetes
+    repo: test-infra
+    base_ref: master
+  interval: 12h
+  spec:
+    serviceAccountName: fuzz-test
+    containers:
+      #TODO(mpherman) : Change to versioned once stable
+    - image: gcr.io/k8s-testimages/ci_fuzz:latest
+      command:
+        - runner.sh
+      args:
+        - python3
+        - "/opt/oss-fuzz/infra/cifuzz/cifuzz_combined_entrypoint.py"
+      # docker-in-docker needs privileged mode
+      securityContext:
+        privileged: true
+      env:
+      - name: MODE
+        value: coverage
+      - name: REPO_NAME
+        value: test-infra
+      - name: SANITIZER
+        value: 'coverage'
+      - name: CLOUD_BUCKET
+        value: gs://prow-cifuzz-test/
+      - name: CFL_PLATFORM
+        value: prow
+  annotations:
+    testgrid-dashboards: sig-testing-misc
+    testgrid-tab-name: test-infra-cfl-coverage-report
+    description: Runs clusterfuzzlite coverage report every day
+
+- name: test-infra-cfl-prune
+  labels:
+    preset-dind-enabled: "true"
+  decorate: true
+  extra_refs:
+  - org: kubernetes
+    repo: test-infra
+    base_ref: master
+  interval: 12h
+  spec:
+    serviceAccountName: fuzz-test
+    containers:
+      #TODO(mpherman) : Change to versioned once stable
+    - image: gcr.io/k8s-testimages/ci_fuzz:latest
+      command:
+        - runner.sh
+      args:
+        - python3
+        - "/opt/oss-fuzz/infra/cifuzz/cifuzz_combined_entrypoint.py"
+      # docker-in-docker needs privileged mode
+      securityContext:
+        privileged: true
+      env:
+      - name: MODE
+        value: prune
+      - name: REPO_NAME
+        value: test-infra
+      - name: CLOUD_BUCKET
+        value: gs://prow-cifuzz-test/
+      - name: CFL_PLATFORM
+        value: prow
+  annotations:
+    testgrid-dashboards: sig-testing-misc
+    testgrid-tab-name: test-infra-cfl-prune
+    description: Runs clusterfuzzlite corpora prune every day

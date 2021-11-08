@@ -21,32 +21,36 @@ import (
 	"reflect"
 	"testing"
 
-	"k8s.io/test-infra/prow/kube"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	prowapi "k8s.io/test-infra/prow/apis/prowjobs/v1"
 )
 
 func TestPickLatest(t *testing.T) {
-	jobs := []kube.ProwJob{
+	earliest := metav1.Time{}
+	earlier := metav1.Now()
+	jobs := []prowapi.ProwJob{
 		// We're using Cluster as a simple way to distinguish runs
-		{Spec: kube.ProwJobSpec{Job: "glob-1", Cluster: "1"}},
-		{Spec: kube.ProwJobSpec{Job: "glob-1", Cluster: "2"}},
-		{Spec: kube.ProwJobSpec{Job: "glob-2", Cluster: "1"}},
-		{Spec: kube.ProwJobSpec{Job: "job-a", Cluster: "1"}},
-		{Spec: kube.ProwJobSpec{Job: "job-ab", Cluster: "1"}},
+		{Status: prowapi.ProwJobStatus{StartTime: earliest}, Spec: prowapi.ProwJobSpec{Job: "glob-1", Cluster: "1"}},
+		{Status: prowapi.ProwJobStatus{StartTime: earlier}, Spec: prowapi.ProwJobSpec{Job: "glob-1", Cluster: "2"}},
+		{Status: prowapi.ProwJobStatus{StartTime: earlier}, Spec: prowapi.ProwJobSpec{Job: "glob-2", Cluster: "1"}},
+		{Status: prowapi.ProwJobStatus{StartTime: earliest}, Spec: prowapi.ProwJobSpec{Job: "job-a", Cluster: "1"}},
+		{Status: prowapi.ProwJobStatus{StartTime: earlier}, Spec: prowapi.ProwJobSpec{Job: "job-a", Cluster: "2"}},
+		{Status: prowapi.ProwJobStatus{StartTime: earlier}, Spec: prowapi.ProwJobSpec{Job: "job-ab", Cluster: "1"}},
 	}
-	expected := []kube.ProwJob{
-		{Spec: kube.ProwJobSpec{Job: "glob-1", Cluster: "1"}},
-		{Spec: kube.ProwJobSpec{Job: "glob-2", Cluster: "1"}},
-		{Spec: kube.ProwJobSpec{Job: "job-a", Cluster: "1"}},
+	expected := []prowapi.ProwJob{
+		{Status: prowapi.ProwJobStatus{StartTime: earlier}, Spec: prowapi.ProwJobSpec{Job: "glob-1", Cluster: "2"}},
+		{Status: prowapi.ProwJobStatus{StartTime: earlier}, Spec: prowapi.ProwJobSpec{Job: "glob-2", Cluster: "1"}},
+		{Status: prowapi.ProwJobStatus{StartTime: earlier}, Spec: prowapi.ProwJobSpec{Job: "job-a", Cluster: "2"}},
 	}
 	result := pickLatestJobs(jobs, "glob-*,job-a")
 	if !reflect.DeepEqual(result, expected) {
 		fmt.Println("expected:")
 		for _, job := range expected {
-			fmt.Printf("  job: %s cluster: %s,", job.Spec.Job, job.Spec.Cluster)
+			fmt.Printf("  job: %s cluster: %s, timestamp %s", job.Spec.Job, job.Spec.Cluster, earlier)
 		}
 		fmt.Println("got:")
 		for _, job := range result {
-			fmt.Printf("  job: %s cluster: %s,", job.Spec.Job, job.Spec.Cluster)
+			fmt.Printf("  job: %s cluster: %s, timestamp %s", job.Spec.Job, job.Spec.Cluster, earlier)
 		}
 	}
 }
@@ -62,11 +66,11 @@ func TestRenderBadge(t *testing.T) {
 		{[]string{"success", "failure"}, "red", "failing 2"},
 		{[]string{"success", "failure", "failure", "failure", "failure"}, "red", "failing 2, 3, 4, ..."},
 	} {
-		jobs := []kube.ProwJob{}
+		jobs := []prowapi.ProwJob{}
 		for i, state := range tc.jobStates {
-			jobs = append(jobs, kube.ProwJob{
-				Spec:   kube.ProwJobSpec{Job: fmt.Sprintf("%d", i+1)},
-				Status: kube.ProwJobStatus{State: kube.ProwJobState(state)},
+			jobs = append(jobs, prowapi.ProwJob{
+				Spec:   prowapi.ProwJobSpec{Job: fmt.Sprintf("%d", i+1)},
+				Status: prowapi.ProwJobStatus{State: prowapi.ProwJobState(state)},
 			})
 		}
 		status, color, _ := renderBadge(jobs)

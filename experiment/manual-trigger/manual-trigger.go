@@ -26,15 +26,16 @@ import (
 
 	"github.com/sirupsen/logrus"
 
-	"k8s.io/test-infra/prow/config"
+	prowapi "k8s.io/test-infra/prow/apis/prowjobs/v1"
+	"k8s.io/test-infra/prow/config/secret"
 	"k8s.io/test-infra/prow/github"
 	"k8s.io/test-infra/prow/jenkins"
-	"k8s.io/test-infra/prow/kube"
 	"k8s.io/test-infra/prow/pod-utils/downwardapi"
 )
 
 type options struct {
 	githubEndpoint         string
+	graphqlEndpoint        string
 	githubTokenFile        string
 	jenkinsBearerTokenFile string
 	jenkinsURL             string
@@ -54,7 +55,8 @@ func flagOptions() options {
 	flag.StringVar(&o.jenkinsTokenFile, "jenkins-token-file", "", "Path to the file containing the Jenkins API token.")
 	flag.StringVar(&o.jenkinsUserName, "jenkins-user-name", "", "Jenkins username.")
 
-	flag.StringVar(&o.githubEndpoint, "github-endpoint", "https://api.github.com", "GitHub's API endpoint.")
+	flag.StringVar(&o.githubEndpoint, "github-endpoint", github.DefaultAPIEndpoint, "GitHub's API endpoint.")
+	flag.StringVar(&o.graphqlEndpoint, "graphql-endpoint", github.DefaultGraphQLEndpoint, "GitHub's GraphQL API endpoint.")
 	flag.StringVar(&o.githubTokenFile, "github-token-file", "", "Path to file containing GitHub OAuth token.")
 
 	flag.StringVar(&o.jobName, "job-name", "", "Name of Jenkins job")
@@ -90,13 +92,19 @@ func sanityCheckFlags(o options) error {
 	if o.githubEndpoint == "" {
 		return fmt.Errorf("empty --github-endpoint")
 	} else if _, err := url.Parse(o.githubEndpoint); err != nil {
-		return fmt.Errorf("bad --github-endpoint provided: %v", err)
+		return fmt.Errorf("bad --github-endpoint provided: %w", err)
+	}
+
+	if o.graphqlEndpoint == "" {
+		return fmt.Errorf("empty --graphql-endpoint")
+	} else if _, err := url.Parse(o.graphqlEndpoint); err != nil {
+		return fmt.Errorf("bad --graphql-endpoint provided: %w", err)
 	}
 
 	if o.jenkinsURL == "" {
 		return fmt.Errorf("empty --jenkins-url")
 	} else if _, err := url.Parse(o.jenkinsURL); err != nil {
-		return fmt.Errorf("bad --jenkins-url provided: %v", err)
+		return fmt.Errorf("bad --jenkins-url provided: %w", err)
 	}
 
 	return nil
@@ -120,8 +128,7 @@ func main() {
 		tokens = append(tokens, o.jenkinsBearerTokenFile)
 	}
 
-	secretAgent := &config.SecretAgent{}
-	if err := secretAgent.Start(tokens); err != nil {
+	if err := secret.Add(tokens...); err != nil {
 		logrus.WithError(err).Fatal("Error starting secrets agent.")
 	}
 
@@ -130,11 +137,11 @@ func main() {
 	if o.jenkinsTokenFile != "" {
 		ac.Basic = &jenkins.BasicAuthConfig{
 			User:     o.jenkinsUserName,
-			GetToken: secretAgent.GetTokenGenerator(o.jenkinsTokenFile),
+			GetToken: secret.GetTokenGenerator(o.jenkinsTokenFile),
 		}
 	} else if o.jenkinsBearerTokenFile != "" {
 		ac.BearerToken = &jenkins.BearerTokenAuthConfig{
-			GetToken: secretAgent.GetTokenGenerator(o.jenkinsBearerTokenFile),
+			GetToken: secret.GetTokenGenerator(o.jenkinsBearerTokenFile),
 		}
 	} else {
 		log.Fatalf("no jenkins auth token provided")
@@ -145,22 +152,22 @@ func main() {
 		log.Fatalf("cannot setup Jenkins client: %v", err)
 	}
 
-	gc := github.NewClient(secretAgent.GetTokenGenerator(o.githubTokenFile), o.githubEndpoint)
+	gc := github.NewClient(secret.GetTokenGenerator(o.githubTokenFile), secret.Censor, o.graphqlEndpoint, o.githubEndpoint)
 
 	pr, err := gc.GetPullRequest(o.org, o.repo, o.num)
 	if err != nil {
 		log.Fatalf("Unable to get information on pull request %s/%s#%d: %v", o.org, o.repo, o.num, err)
 	}
 
-	spec := kube.ProwJobSpec{
-		Type: kube.PresubmitJob,
+	spec := prowapi.ProwJobSpec{
+		Type: prowapi.PresubmitJob,
 		Job:  o.jobName,
-		Refs: &kube.Refs{
+		Refs: &prowapi.Refs{
 			Org:     o.org,
 			Repo:    o.repo,
 			BaseRef: pr.Base.Ref,
 			BaseSHA: pr.Base.SHA,
-			Pulls: []kube.Pull{
+			Pulls: []prowapi.Pull{
 				{
 					Number: pr.Number,
 					Author: pr.User.Login,

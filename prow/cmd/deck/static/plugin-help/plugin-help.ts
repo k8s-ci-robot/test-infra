@@ -1,16 +1,11 @@
-import "dialog-polyfill";
+import "code-prettify";
+import dialogPolyfill from "dialog-polyfill";
 import {Command, Help, PluginHelp} from "../api/help";
-
-declare const dialogPolyfill: {
-  registerDialog(element: HTMLDialogElement): void;
-};
+import {getParameterByName} from '../common/urls';
+import {Language, Prettify} from "./prettify";
 
 declare const allHelp: Help;
-
-function getParameterByName(name: string): string | null {  // http://stackoverflow.com/a/5158301/3694
-    const match = new RegExp('[?&]' + name + '=([^&/]*)').exec(window.location.search);
-    return match && decodeURIComponent(match[1].replace(/\+/g, ' '));
-}
+declare const PR: Prettify;
 
 function redrawOptions(): void {
     const rs = allHelp.AllRepos.sort();
@@ -27,7 +22,7 @@ function redrawOptions(): void {
     });
 }
 
-window.onload = function (): void {
+window.onload = (): void => {
     // set dropdown based on options from query string
     redrawOptions();
     redraw();
@@ -57,7 +52,7 @@ function addDialogSection(title: string, body: string | HTMLElement[]): HTMLElem
 
     sectionBody.classList.add("dialog-section-body");
     if (Array.isArray(body)) {
-        body.forEach(el => {
+        body.forEach((el) => {
            sectionBody.appendChild(el);
         });
     } else {
@@ -74,13 +69,22 @@ function addDialogSection(title: string, body: string | HTMLElement[]): HTMLElem
     return container;
 }
 
+function genCodeSnippetSummary(snippet: string, language: Language = "yaml"): string {
+    return `
+        <details>
+            <summary>Example <b>plugins.yaml</b> configuration:</summary>
+            <pre class="prettyprint"><code class="language-${language}">${snippet}</code></pre>
+        </details>
+    `;
+}
+
 /**
  * Return a list of link elements that links to commands.
  * @param commands list of commands
  */
 function getLinkableCommands(commands: Command[]): HTMLAnchorElement[] {
     const result: HTMLAnchorElement[] = [];
-    commands.forEach(command => {
+    commands.forEach((command) => {
        const commandName = extractCommandName(command.Examples[0]);
        const link = document.createElement("a");
        link.href = "/command-help#" + commandName;
@@ -122,35 +126,39 @@ function createPlugin(repo: string, name: string, pluginObj: {isExternal: boolea
     actionButton.innerHTML = "Details";
     actionButton.classList.add(...["mdl-button", "mdl-button--colored", "mdl-js-button", "mdl-js-ripple-effect"]);
     actionButton.addEventListener("click", () => {
-        const dialog = document.querySelector("dialog") as HTMLDialogElement;
-        const title = dialog.querySelector(".mdl-dialog__title")!;
-        const content = dialog.querySelector(".mdl-dialog__content")!;
+        const dialogElement = document.querySelector("dialog") as HTMLDialogElement;
+        const titleElement = dialogElement.querySelector(".mdl-dialog__title")!;
+        const contentElement = dialogElement.querySelector(".mdl-dialog__content")!;
 
-        while (content.firstChild) {
-            content.removeChild(content.firstChild);
+        while (contentElement.firstChild) {
+            contentElement.removeChild(contentElement.firstChild);
         }
 
-        title.innerHTML = name;
+        titleElement.innerHTML = name;
         if (plugin.Description) {
-            content.appendChild(addDialogSection("Description", plugin.Description));
+            contentElement.appendChild(addDialogSection("Description", plugin.Description));
         }
         if (plugin.Events) {
-            const sectionContent = "[" + plugin.Events.sort().join(", ") + "]";
-            content.appendChild(addDialogSection("Events handled", sectionContent));
+            const sectionContent = `[${plugin.Events.sort().join(", ")}]`;
+            contentElement.appendChild(addDialogSection("Events handled", sectionContent));
         }
         if (plugin.Config) {
-            let sectionContent = plugin.Config ? plugin.Config[repo] : "";
-            let sectionTitle =
-                repo === "" ? "Configuration(global)" : "Configuration(" + repo + ")";
+            const sectionContent = plugin.Config ? plugin.Config[repo] : "";
+            const sectionTitle =
+                repo === "" ? "Configuration(global)" : `Configuration(${repo})`;
             if (sectionContent && sectionContent !== "") {
-                content.appendChild(addDialogSection(sectionTitle, sectionContent));
+                contentElement.appendChild(addDialogSection(sectionTitle, sectionContent));
             }
         }
         if (plugin.Commands) {
-            let sectionContent = getLinkableCommands(plugin.Commands);
-            content.appendChild(addDialogSection("Commands", sectionContent));
+            const sectionContent = getLinkableCommands(plugin.Commands);
+            contentElement.appendChild(addDialogSection("Commands", sectionContent));
         }
-        dialog.showModal();
+        if (plugin.Snippet) {
+            contentElement.appendChild(addDialogSection("Snippet", genCodeSnippetSummary(plugin.Snippet)));
+            PR.prettyPrint();
+        }
+        dialogElement.showModal();
     });
     cardAction.appendChild(actionButton);
     cardAction.classList.add("mdl-card__actions", "mdl-card--border");
@@ -210,8 +218,8 @@ function redrawPlugin(repo: string, helpMap: Map<string, {isExternal: boolean, p
     }
     const names = helpMap.keys();
     const nameArray = Array.from(names).sort();
-    nameArray.forEach(name => {
-        container.appendChild(createPlugin(repo, name, helpMap.get(name)!))
+    nameArray.forEach((name) => {
+        container.appendChild(createPlugin(repo, name, helpMap.get(name)!));
     });
 }
 
@@ -225,7 +233,7 @@ function redraw(): void {
             history.replaceState(null, "", "/plugins?repo="
                 + encodeURIComponent(repoSel));
         } else {
-            history.replaceState(null, "", "/plugins")
+            history.replaceState(null, "", "/plugins");
         }
     }
     redrawOptions();
@@ -238,7 +246,7 @@ function redraw(): void {
                     name,
                     {
                         isExternal: false,
-                        plugin: allHelp.PluginHelp[name]
+                        plugin: allHelp.PluginHelp[name],
                     });
             }
         });
@@ -249,7 +257,7 @@ function redraw(): void {
                     name,
                     {
                         isExternal: true,
-                        plugin: allHelp.ExternalPluginHelp[name]
+                        plugin: allHelp.ExternalPluginHelp[name],
                     });
             }
         });
@@ -270,8 +278,8 @@ function getFirstSentence(text: string): string {
 function isDeprecated(text: string): boolean {
     const dictionary = ["deprecated!"];
     text = text.toLowerCase();
-    for (let i = 0; i < dictionary.length; i++) {
-        if (text.indexOf(dictionary[i]) !== -1) {
+    for (const entry of dictionary) {
+        if (text.indexOf(entry) !== -1) {
             return true;
         }
     }

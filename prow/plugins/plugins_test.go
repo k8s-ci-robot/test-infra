@@ -17,12 +17,88 @@ limitations under the License.
 package plugins
 
 import (
-	"errors"
-	"reflect"
+	"io/ioutil"
+	"os"
+	"path/filepath"
+	"regexp"
 	"testing"
+
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
+	"sigs.k8s.io/yaml"
+
+	"k8s.io/test-infra/pkg/genyaml"
 )
 
-func TestGetPlugins(t *testing.T) {
+func TestHasSelfApproval(t *testing.T) {
+	cases := []struct {
+		name     string
+		cfg      string
+		expected bool
+	}{
+		{
+			name:     "self approval by default",
+			expected: true,
+		},
+		{
+			name:     "reject approval when require_self_approval set",
+			cfg:      `{"require_self_approval": true}`,
+			expected: false,
+		},
+		{
+			name:     "has approval when require_self_approval set to false",
+			cfg:      `{"require_self_approval": false}`,
+			expected: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var a Approve
+			if err := yaml.Unmarshal([]byte(tc.cfg), &a); err != nil {
+				t.Fatalf("failed to unmarshal cfg: %v", err)
+			}
+			if actual := a.HasSelfApproval(); actual != tc.expected {
+				t.Errorf("%t != expected %t", actual, tc.expected)
+			}
+		})
+	}
+}
+
+func TestConsiderReviewState(t *testing.T) {
+	cases := []struct {
+		name     string
+		cfg      string
+		expected bool
+	}{
+		{
+			name:     "consider by default",
+			expected: true,
+		},
+		{
+			name: "do not consider when irs = true",
+			cfg:  `{"ignore_review_state": true}`,
+		},
+		{
+			name:     "consider when irs = false",
+			cfg:      `{"ignore_review_state": false}`,
+			expected: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var a Approve
+			if err := yaml.Unmarshal([]byte(tc.cfg), &a); err != nil {
+				t.Fatalf("failed to unmarshal cfg: %v", err)
+			}
+			if actual := a.ConsiderReviewState(); actual != tc.expected {
+				t.Errorf("%t != expected %t", actual, tc.expected)
+			}
+		})
+	}
+}
+
+func TestGetPluginsLegacy(t *testing.T) {
 	var testcases = []struct {
 		name            string
 		pluginMap       map[string][]string // this is read from the plugins.yaml file typically.
@@ -71,313 +147,226 @@ func TestGetPlugins(t *testing.T) {
 		},
 	}
 	for _, tc := range testcases {
+		pa := ConfigAgent{configuration: &Configuration{Plugins: OldToNewPlugins(tc.pluginMap)}}
+
+		plugins := pa.getPlugins(tc.owner, tc.repo)
+		if diff := cmp.Diff(plugins, tc.expectedPlugins); diff != "" {
+			t.Errorf("Actual plugins differ from expected: %s", diff)
+		}
+	}
+}
+
+func TestGetPlugins(t *testing.T) {
+	var testcases = []struct {
+		name            string
+		pluginMap       Plugins // this is read from the plugins.yaml file typically.
+		owner           string
+		repo            string
+		expectedPlugins []string
+	}{
+		{
+			name: "All plugins enabled for org should be returned for any org/repo query",
+			pluginMap: Plugins{
+				"org1": {Plugins: []string{"plugin1", "plugin2"}},
+			},
+			owner:           "org1",
+			repo:            "repo",
+			expectedPlugins: []string{"plugin1", "plugin2"},
+		},
+		{
+			name: "All plugins enabled for org/repo should be returned for a org/repo query",
+			pluginMap: Plugins{
+				"org1":      {Plugins: []string{"plugin1", "plugin2"}},
+				"org1/repo": {Plugins: []string{"plugin3"}},
+			},
+			owner:           "org1",
+			repo:            "repo",
+			expectedPlugins: []string{"plugin1", "plugin2", "plugin3"},
+		},
+		{
+			name: "Excluded plugins for repo enabled for org/repo should not be returned for a org/repo query",
+			pluginMap: Plugins{
+				"org1":      {Plugins: []string{"plugin1", "plugin2", "plugin3"}, ExcludedRepos: []string{"repo"}},
+				"org1/repo": {Plugins: []string{"plugin3"}},
+			},
+			owner:           "org1",
+			repo:            "repo",
+			expectedPlugins: []string{"plugin3"},
+		},
+		{
+			name: "Plugins for org1/repo should not be returned for org2/repo query",
+			pluginMap: Plugins{
+				"org1":      {Plugins: []string{"plugin1", "plugin2"}},
+				"org1/repo": {Plugins: []string{"plugin3"}},
+			},
+			owner:           "org2",
+			repo:            "repo",
+			expectedPlugins: nil,
+		},
+		{
+			name: "Plugins for org1 should not be returned for org2/repo query",
+			pluginMap: Plugins{
+				"org1":      {Plugins: []string{"plugin1", "plugin2"}},
+				"org2/repo": {Plugins: []string{"plugin3"}},
+			},
+			owner:           "org2",
+			repo:            "repo",
+			expectedPlugins: []string{"plugin3"},
+		},
+	}
+	for _, tc := range testcases {
 		pa := ConfigAgent{configuration: &Configuration{Plugins: tc.pluginMap}}
 
 		plugins := pa.getPlugins(tc.owner, tc.repo)
-		if len(plugins) != len(tc.expectedPlugins) {
-			t.Errorf("Different number of plugins for case \"%s\". Got %v, expected %v", tc.name, plugins, tc.expectedPlugins)
-		} else {
-			for i := range plugins {
-				if plugins[i] != tc.expectedPlugins[i] {
-					t.Errorf("Different plugin for case \"%s\": Got %v expected %v", tc.name, plugins, tc.expectedPlugins)
+		if diff := cmp.Diff(plugins, tc.expectedPlugins); diff != "" {
+			t.Errorf("Actual plugins differ from expected: %s", diff)
+		}
+	}
+}
+
+func TestGenYamlDocs(t *testing.T) {
+	const fixtureName = "./plugin-config-documented.yaml"
+	inputFiles, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatalf("filepath.Glob: %v", err)
+	}
+
+	commentMap, err := genyaml.NewCommentMap(inputFiles...)
+	if err != nil {
+		t.Fatalf("failed to construct commentMap: %v", err)
+	}
+	actualYaml, err := commentMap.GenYaml(genyaml.PopulateStruct(&Configuration{}))
+	if err != nil {
+		t.Fatalf("genyaml errored: %v", err)
+	}
+	if os.Getenv("UPDATE") != "" {
+		if err := ioutil.WriteFile(fixtureName, []byte(actualYaml), 0644); err != nil {
+			t.Fatalf("failed to write fixture: %v", err)
+		}
+	}
+	expectedYaml, err := ioutil.ReadFile(fixtureName)
+	if err != nil {
+		t.Fatalf("failed to read fixture: %v", err)
+	}
+	if diff := cmp.Diff(actualYaml, string(expectedYaml)); diff != "" {
+		t.Errorf("Actual result differs from expected: %s\nIf this is expected, re-run the tests with the UPDATE env var set to update the fixture:\n\tUPDATE=true go test ./prow/plugins/... -run TestGenYamlDocs", diff)
+	}
+}
+
+func TestLoad(t *testing.T) {
+	t.Parallel()
+
+	defaultedConfig := func(m ...func(*Configuration)) *Configuration {
+		cfg := &Configuration{
+			Owners:      Owners{LabelsDenyList: []string{"approved", "lgtm"}},
+			Blunderbuss: Blunderbuss{ReviewerCount: func() *int { i := 2; return &i }()},
+			CherryPickUnapproved: CherryPickUnapproved{
+				BranchRegexp: "^release-.*$",
+				BranchRe:     regexp.MustCompile("^release-.*$"),
+				Comment:      "This PR is not for the master branch but does not have the `cherry-pick-approved`  label. Adding the `do-not-merge/cherry-pick-not-approved`  label.",
+			},
+			ConfigUpdater: ConfigUpdater{
+				Maps: map[string]ConfigMapSpec{
+					"config/prow/config.yaml":  {Name: "config", Clusters: map[string][]string{"default": {""}}},
+					"config/prow/plugins.yaml": {Name: "plugins", Clusters: map[string][]string{"default": {""}}}},
+			},
+			Heart: Heart{CommentRe: regexp.MustCompile("")},
+			SigMention: SigMention{
+				Regexp: `(?m)@kubernetes/sig-([\w-]*)-(misc|test-failures|bugs|feature-requests|proposals|pr-reviews|api-reviews)`,
+				Re:     regexp.MustCompile(`(?m)@kubernetes/sig-([\w-]*)-(misc|test-failures|bugs|feature-re)`),
+			},
+			Help: Help{
+				HelpGuidelinesURL: "https://git.k8s.io/community/contributors/guide/help-wanted.md",
+			},
+		}
+		for _, modify := range m {
+			modify(cfg)
+		}
+		return cfg
+	}
+
+	testCases := []struct {
+		name   string
+		config string
+		// filename -> content
+		supplementalConfigs                map[string]string
+		supplementalPluginConfigFileSuffix string
+
+		expected *Configuration
+	}{
+		{
+			name: "Single-file config gets loaded",
+			config: `
+plugins:
+  org/repo:
+  - wip`,
+			expected: defaultedConfig(func(c *Configuration) {
+				c.Plugins = Plugins{"org/repo": {Plugins: []string{"wip"}}}
+			}),
+		},
+		{
+			name: "Supplemental configs get loaded and merged",
+			config: `
+plugins:
+  org/repo:
+  - wip`,
+			supplementalConfigs: map[string]string{
+				"some-path-extra_config.yaml": `
+plugins:
+  org/repo2:
+  - wip`,
+			},
+			supplementalPluginConfigFileSuffix: "extra_config.yaml",
+			expected: defaultedConfig(func(c *Configuration) {
+				c.Plugins = Plugins{
+					"org/repo":  {Plugins: []string{"wip"}},
+					"org/repo2": {Plugins: []string{"wip"}},
+				}
+			}),
+		},
+		{
+			name: "Supplemental configs that do not have right suffix are ignored",
+			config: `
+plugins:
+  org/repo:
+  - wip`,
+			supplementalConfigs: map[string]string{
+				"some-path-extra_config.yaml": `
+plugins:
+  org/repo:
+  - wip`,
+			},
+			supplementalPluginConfigFileSuffix: "nope",
+			expected: defaultedConfig(func(c *Configuration) {
+				c.Plugins = Plugins{"org/repo": {Plugins: []string{"wip"}}}
+			}),
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			tempDir := t.TempDir()
+			if err := ioutil.WriteFile(filepath.Join(tempDir, "_plugins.yaml"), []byte(tc.config), 0644); err != nil {
+				t.Fatalf("failed to write config: %v", err)
+			}
+			for supplementalConfigName, supplementalConfig := range tc.supplementalConfigs {
+				if err := ioutil.WriteFile(filepath.Join(tempDir, supplementalConfigName), []byte(supplementalConfig), 0644); err != nil {
+					t.Fatalf("failed to write supplemental config %s: %v", supplementalConfigName, err)
 				}
 			}
-		}
-	}
-}
 
-func TestValidateExternalPlugins(t *testing.T) {
-	tests := []struct {
-		name        string
-		plugins     map[string][]ExternalPlugin
-		expectedErr error
-	}{
-		{
-			name: "valid config",
-			plugins: map[string][]ExternalPlugin{
-				"kubernetes/test-infra": {
-					{
-						Name: "cherrypick",
-					},
-					{
-						Name: "configupdater",
-					},
-					{
-						Name: "tetris",
-					},
-				},
-				"kubernetes": {
-					{
-						Name: "coffeemachine",
-					},
-					{
-						Name: "blender",
-					},
-				},
-			},
-			expectedErr: nil,
-		},
-		{
-			name: "invalid config",
-			plugins: map[string][]ExternalPlugin{
-				"kubernetes/test-infra": {
-					{
-						Name: "cherrypick",
-					},
-					{
-						Name: "configupdater",
-					},
-					{
-						Name: "tetris",
-					},
-				},
-				"kubernetes": {
-					{
-						Name: "coffeemachine",
-					},
-					{
-						Name: "tetris",
-					},
-				},
-			},
-			expectedErr: errors.New("invalid plugin configuration:\n\texternal plugins [tetris] are duplicated for kubernetes/test-infra and kubernetes"),
-		},
-	}
-
-	for _, test := range tests {
-		t.Logf("Running scenario %q", test.name)
-
-		err := validateExternalPlugins(test.plugins)
-		if !reflect.DeepEqual(err, test.expectedErr) {
-			t.Errorf("unexpected error: %v, expected: %v", err, test.expectedErr)
-		}
-	}
-}
-
-func TestSetDefault_Maps(t *testing.T) {
-	cases := []struct {
-		name     string
-		config   ConfigUpdater
-		expected map[string]ConfigMapSpec
-	}{
-		{
-			name: "nothing",
-			expected: map[string]ConfigMapSpec{
-				"prow/config.yaml":  {Name: "config"},
-				"prow/plugins.yaml": {Name: "plugins"},
-			},
-		},
-		{
-			name: "basic",
-			config: ConfigUpdater{
-				Maps: map[string]ConfigMapSpec{
-					"hello.yaml": {Name: "my-cm"},
-					"world.yaml": {Name: "you-cm"},
-				},
-			},
-			expected: map[string]ConfigMapSpec{
-				"hello.yaml": {Name: "my-cm"},
-				"world.yaml": {Name: "you-cm"},
-			},
-		},
-		{
-			name: "deprecated config",
-			config: ConfigUpdater{
-				ConfigFile: "foo.yaml",
-			},
-			expected: map[string]ConfigMapSpec{
-				"foo.yaml":          {Name: "config"},
-				"prow/plugins.yaml": {Name: "plugins"},
-			},
-		},
-		{
-			name: "deprecated plugins",
-			config: ConfigUpdater{
-				PluginFile: "bar.yaml",
-			},
-			expected: map[string]ConfigMapSpec{
-				"bar.yaml":         {Name: "plugins"},
-				"prow/config.yaml": {Name: "config"},
-			},
-		},
-		{
-			name: "deprecated both",
-			config: ConfigUpdater{
-				ConfigFile: "foo.yaml",
-				PluginFile: "bar.yaml",
-			},
-			expected: map[string]ConfigMapSpec{
-				"foo.yaml": {Name: "config"},
-				"bar.yaml": {Name: "plugins"},
-			},
-		},
-		{
-			name: "both current and deprecated",
-			config: ConfigUpdater{
-				Maps: map[string]ConfigMapSpec{
-					"config.yaml":        {Name: "overwrite-config"},
-					"plugins.yaml":       {Name: "overwrite-plugins"},
-					"unconflicting.yaml": {Name: "ignored"},
-				},
-				ConfigFile: "config.yaml",
-				PluginFile: "plugins.yaml",
-			},
-			expected: map[string]ConfigMapSpec{
-				"config.yaml":        {Name: "overwrite-config"},
-				"plugins.yaml":       {Name: "overwrite-plugins"},
-				"unconflicting.yaml": {Name: "ignored"},
-			},
-		},
-	}
-	for _, tc := range cases {
-		cfg := Configuration{
-			ConfigUpdater: tc.config,
-		}
-		cfg.setDefaults()
-		actual := cfg.ConfigUpdater.Maps
-		if len(actual) != len(tc.expected) {
-			t.Errorf("%s: actual and expected have different keys: %v %v", tc.name, actual, tc.expected)
-			continue
-		}
-		for k, n := range tc.expected {
-			if an := actual[k]; an != n {
-				t.Errorf("%s - %s: expected %s != actual %s", tc.name, k, n, an)
+			agent := &ConfigAgent{}
+			if err := agent.Load(filepath.Join(tempDir, "_plugins.yaml"), []string{tempDir}, tc.supplementalPluginConfigFileSuffix, false); err != nil {
+				t.Fatalf("failed to load: %v", err)
 			}
-		}
-	}
-}
 
-func TestSetTriggerDefaults(t *testing.T) {
-	tests := []struct {
-		name string
+			if diff := cmp.Diff(tc.expected, agent.Config(), cmpopts.IgnoreTypes(regexp.Regexp{})); diff != "" {
+				t.Errorf("expected config differs from actual: %s", diff)
+			}
 
-		trustedOrg string
-		joinOrgURL string
-
-		expectedTrustedOrg string
-		expectedJoinOrgURL string
-	}{
-		{
-			name: "url defaults to org",
-
-			trustedOrg: "kubernetes",
-			joinOrgURL: "",
-
-			expectedTrustedOrg: "kubernetes",
-			expectedJoinOrgURL: "https://github.com/orgs/kubernetes/people",
-		},
-		{
-			name: "both org and url are set",
-
-			trustedOrg: "kubernetes",
-			joinOrgURL: "https://git.k8s.io/community/community-membership.md#member",
-
-			expectedTrustedOrg: "kubernetes",
-			expectedJoinOrgURL: "https://git.k8s.io/community/community-membership.md#member",
-		},
-		{
-			name: "only url is set",
-
-			trustedOrg: "",
-			joinOrgURL: "https://git.k8s.io/community/community-membership.md#member",
-
-			expectedTrustedOrg: "",
-			expectedJoinOrgURL: "https://git.k8s.io/community/community-membership.md#member",
-		},
-		{
-			name: "nothing is set",
-
-			trustedOrg: "",
-			joinOrgURL: "",
-
-			expectedTrustedOrg: "",
-			expectedJoinOrgURL: "",
-		},
-	}
-
-	for _, test := range tests {
-		c := &Configuration{
-			Triggers: []Trigger{
-				{
-					TrustedOrg: test.trustedOrg,
-					JoinOrgURL: test.joinOrgURL,
-				},
-			},
-		}
-
-		c.setDefaults()
-
-		if c.Triggers[0].TrustedOrg != test.expectedTrustedOrg {
-			t.Errorf("unexpected trusted_org: %s, expected: %s", c.Triggers[0].TrustedOrg, test.expectedTrustedOrg)
-		}
-		if c.Triggers[0].JoinOrgURL != test.expectedJoinOrgURL {
-			t.Errorf("unexpected join_org_url: %s, expected: %s", c.Triggers[0].JoinOrgURL, test.expectedJoinOrgURL)
-		}
-	}
-}
-
-func TestSetCherryPickUnapprovedDefaults(t *testing.T) {
-	defaultBranchRegexp := `^release-.*$`
-	defaultComment := `This PR is not for the master branch but does not have the ` + "`cherry-pick-approved`" + `  label. Adding the ` + "`do-not-merge/cherry-pick-not-approved`" + `  label.
-
-To approve the cherry-pick, please assign the patch release manager for the release branch by writing ` + "`/assign @username`" + ` in a comment when ready.
-
-The list of patch release managers for each release can be found [here](https://git.k8s.io/sig-release/release-managers.md).`
-
-	testcases := []struct {
-		name string
-
-		branchRegexp string
-		comment      string
-
-		expectedBranchRegexp string
-		expectedComment      string
-	}{
-		{
-			name:                 "none of branchRegexp and comment are set",
-			branchRegexp:         "",
-			comment:              "",
-			expectedBranchRegexp: defaultBranchRegexp,
-			expectedComment:      defaultComment,
-		},
-		{
-			name:                 "only branchRegexp is set",
-			branchRegexp:         `release-1.1.*$`,
-			comment:              "",
-			expectedBranchRegexp: `release-1.1.*$`,
-			expectedComment:      defaultComment,
-		},
-		{
-			name:                 "only comment is set",
-			branchRegexp:         "",
-			comment:              "custom comment",
-			expectedBranchRegexp: defaultBranchRegexp,
-			expectedComment:      "custom comment",
-		},
-		{
-			name:                 "both branchRegexp and comment are set",
-			branchRegexp:         `release-1.1.*$`,
-			comment:              "custom comment",
-			expectedBranchRegexp: `release-1.1.*$`,
-			expectedComment:      "custom comment",
-		},
-	}
-
-	for _, tc := range testcases {
-		c := &Configuration{
-			CherryPickUnapproved: CherryPickUnapproved{
-				BranchRegexp: tc.branchRegexp,
-				Comment:      tc.comment,
-			},
-		}
-
-		c.setDefaults()
-
-		if c.CherryPickUnapproved.BranchRegexp != tc.expectedBranchRegexp {
-			t.Errorf("unexpected branchRegexp: %s, expected: %s", c.CherryPickUnapproved.BranchRegexp, tc.expectedBranchRegexp)
-		}
-		if c.CherryPickUnapproved.Comment != tc.expectedComment {
-			t.Errorf("unexpected comment: %s, expected: %s", c.CherryPickUnapproved.Comment, tc.expectedComment)
-		}
+		})
 	}
 }

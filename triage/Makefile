@@ -1,4 +1,4 @@
-# Copyright 2016 The Kubernetes Authors.
+# Copyright 2020 The Kubernetes Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,25 +12,32 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-IMG = gcr.io/k8s-testimages/triage
-TAG := $(shell date +v%Y%m%d)-$(shell git describe --tags --always --dirty)
-
+.PHONY: build
 build:
-	docker build -t $(IMG):$(TAG) .
-	docker tag $(IMG):$(TAG) $(IMG):latest
-	echo Built $(IMG):$(TAG) and tagged with $(IMG):latest ;
+	go build .
+
+.PHONY: test
+test:
+	go test ./...
 
 push:
-	docker push $(IMG):$(TAG)
-	docker push $(IMG):latest
-	echo Pushed $(IMG):latest and $(IMG):$(TAG)
+  bazel run //images/builder -- --project=k8s-staging-test-infra --scratch-bucket=gs://k8s-staging-test-infra-scratch triage
 
-push_static:
-	gsutil -h 'Cache-Control: no-store, must-revalidate' -m cp -Z -a public-read index.html interactive.js model.js render.js style.css gs://k8s-gubernator/triage/
+STATIC_FILES=index.html interactive.js model.js render.js style.css
 
-push_staging:
-	gsutil -h 'Cache-Control: no-store, must-revalidate' -m cp -Z -a public-read index.html interactive.js model.js render.js style.css gs://k8s-gubernator/triage/staging/
+# these need to be run by k8s-infra-prow or community members with access to the kubernetes.io GCP org
+push-static:
+	gsutil -h 'Cache-Control: no-store, must-revalidate' -m cp $(STATIC_FILES) gs://k8s-triage/
 
-.PHONY: all build push push_static
+push-staging:
+	gsutil -h 'Cache-Control: no-store, must-revalidate' -m cp $(STATIC_FILES) gs://k8s-triage/staging/
 
-all: build
+# these need to be run by k8s-prow or googlers with access to the google.com GCP org
+redirect-static:
+	gsutil -h 'Cache-Control: no-store, must-revalidate' -m cp -a public-read redirect/index.html gs://k8s-gubernator/triage/
+
+redirect-staging:
+	gsutil -h 'Cache-Control: no-store, must-revalidate' -m cp -a public-read redirect/index.html gs://k8s-gubernator/triage/staging/
+
+.PHONY: push push-static push-staging redirect-static redirect-staging
+

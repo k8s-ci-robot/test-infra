@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Copyright 2017 The Kubernetes Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -21,7 +21,7 @@ config="$( mktemp )"
 trap "rm ${config}" EXIT
 
 cp ./config.yaml "${config}"
-./update_config.py ./../prow/config.yaml ./../config/jobs "${config}"
+./update_config.py ./../config/prow/config.yaml ./../config/jobs "${config}"
 
 if ! output="$( diff ./config.yaml "${config}" )"; then
     echo "Gubernator configuration file is out of sync!"

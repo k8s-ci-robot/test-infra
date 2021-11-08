@@ -29,25 +29,35 @@ import (
 )
 
 // K8s returns $GOPATH/src/k8s.io/...
-func K8s(topdir string, parts ...string) string {
+func K8s(projectName string, parts ...string) string {
+	return getProjectDir("k8s.io", projectName, parts...)
+}
+
+// K8sSigs returns $GOPATH/src/sigs.k8s.io/...
+func K8sSigs(projectName string, parts ...string) string {
+	return getProjectDir("sigs.k8s.io", projectName, parts...)
+}
+
+// GetProjectDir returns $GOPATH/src/<project-namespace>/...
+func getProjectDir(namespace, projectName string, parts ...string) string {
 	gopathList := filepath.SplitList(build.Default.GOPATH)
-	found := false
-	var kubedir string
+	var found bool
+	var projectDir string
 	for _, gopath := range gopathList {
-		kubedir = filepath.Join(gopath, "src", "k8s.io", topdir)
-		if _, err := os.Stat(kubedir); !os.IsNotExist(err) {
+		projectDir = filepath.Join(gopath, "src", namespace, projectName)
+		if _, err := os.Stat(projectDir); !os.IsNotExist(err) {
 			found = true
 			break
 		}
 	}
-	if !found {
+	if !found && len(gopathList) > 0 {
 		// Default to the first item in GOPATH list.
-		kubedir = filepath.Join(gopathList[0], "src", "k8s.io", topdir)
+		projectDir = filepath.Join(gopathList[0], "src", "k8s.io", projectName)
 		log.Printf(
-			"Warning: Couldn't find directory src/k8s.io/%s under any of GOPATH %s, defaulting to %s",
-			topdir, build.Default.GOPATH, kubedir)
+			"Warning: Couldn't find directory src/%s/%s under any of GOPATH %s, defaulting to %s",
+			namespace, projectName, build.Default.GOPATH, projectDir)
 	}
-	p := []string{kubedir}
+	p := []string{projectDir}
 	p = append(p, parts...)
 	return filepath.Join(p...)
 }
@@ -63,9 +73,7 @@ func AppendError(errs []error, err error) []error {
 // Home returns $HOME/part/part/part
 func Home(parts ...string) string {
 	p := []string{os.Getenv("HOME")}
-	for _, a := range parts {
-		p = append(p, a)
-	}
+	p = append(p, parts...)
 	return filepath.Join(p...)
 }
 
@@ -98,7 +106,7 @@ func JoinURL(urlPath, path string) (string, error) {
 func Pushd(dir string) (func() error, error) {
 	old, err := os.Getwd()
 	if err != nil {
-		return nil, fmt.Errorf("failed to os.Getwd(): %v", err)
+		return nil, fmt.Errorf("failed to os.Getwd(): %w", err)
 	}
 	if err = os.Chdir(dir); err != nil {
 		return nil, err
@@ -112,7 +120,7 @@ func Pushd(dir string) (func() error, error) {
 func PushEnv(env, value string) (func() error, error) {
 	prev, present := os.LookupEnv(env)
 	if err := os.Setenv(env, value); err != nil {
-		return nil, fmt.Errorf("could not set %s: %v", env, err)
+		return nil, fmt.Errorf("could not set %s: %w", env, err)
 	}
 	return func() error {
 		if present {
@@ -152,7 +160,7 @@ func MigrateOptions(m []MigratedOption) error {
 			continue
 		}
 		if err := os.Setenv(s.Env, *s.Option); err != nil {
-			return fmt.Errorf("could not set %s=%s: %v", s.Env, *s.Option, err)
+			return fmt.Errorf("could not set %s=%s: %w", s.Env, *s.Option, err)
 		}
 	}
 	return nil
@@ -228,10 +236,10 @@ func ExecError(err error) string {
 func EnsureExecutable(p string) error {
 	s, err := os.Stat(p)
 	if err != nil {
-		return fmt.Errorf("error doing stat on %q: %v", p, err)
+		return fmt.Errorf("error doing stat on %q: %w", p, err)
 	}
 	if err := os.Chmod(p, s.Mode()|0111); err != nil {
-		return fmt.Errorf("error doing chmod on %q: %v", p, err)
+		return fmt.Errorf("error doing chmod on %q: %w", p, err)
 	}
 	return nil
 }

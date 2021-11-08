@@ -27,15 +27,16 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"k8s.io/apimachinery/pkg/util/sets"
+	prowconfig "k8s.io/test-infra/prow/config"
 	"k8s.io/test-infra/prow/github"
 	"k8s.io/test-infra/prow/pluginhelp"
 	"k8s.io/test-infra/prow/pluginhelp/externalplugins"
 	"k8s.io/test-infra/prow/plugins"
 )
 
-type fakeGithubClient map[string][]string
+type fakeGitHubClient map[string][]string
 
-func (fghc fakeGithubClient) GetRepos(org string, _ bool) ([]github.Repo, error) {
+func (fghc fakeGitHubClient) GetRepos(org string, _ bool) ([]github.Repo, error) {
 	var repos []github.Repo
 	for _, repo := range fghc[org] {
 		repos = append(repos, github.Repo{FullName: fmt.Sprintf("%s/%s", org, repo)})
@@ -52,7 +53,7 @@ func (fpa fakePluginAgent) Config() *plugins.Configuration {
 
 func TestGeneratePluginHelp(t *testing.T) {
 	orgToRepos := map[string][]string{"org1": {"repo1", "repo2", "repo3"}, "org2": {"repo1"}}
-	fghc := fakeGithubClient(orgToRepos)
+	fghc := fakeGitHubClient(orgToRepos)
 
 	normalHelp := map[string]pluginhelp.PluginHelp{
 		"org-plugin": {Description: "org-plugin", Config: map[string]string{"": "overall config"}},
@@ -75,8 +76,8 @@ func TestGeneratePluginHelp(t *testing.T) {
 	externalplugins.ServeExternalPluginHelp(
 		mux,
 		logrus.WithField("plugin", "helpful-external"),
-		func(enabledRepos []string) (*pluginhelp.PluginHelp, error) {
-			if got, expected := enabledRepos, []string{"org1/repo1"}; !reflect.DeepEqual(got, expected) {
+		func(enabledRepos []prowconfig.OrgRepo) (*pluginhelp.PluginHelp, error) {
+			if got, expected := enabledRepos, []prowconfig.OrgRepo{{Org: "org1", Repo: "repo1"}}; !reflect.DeepEqual(got, expected) {
 				t.Errorf("Plugin 'helpful-external' expected to be enabled on repos %q, but got %q.", expected, got)
 			}
 			return &helpfulExternalHelp, nil
@@ -86,11 +87,11 @@ func TestGeneratePluginHelp(t *testing.T) {
 	defer helpfulServer.Close()
 
 	config := &plugins.Configuration{
-		Plugins: map[string][]string{
-			"org1":       {"org-plugin"},
-			"org1/repo1": {"repo-plugin1", "no-help-plugin"},
-			"org1/repo2": {"repo-plugin1", "repo-plugin2"},
-			"org2/repo1": {"repo-plugin3"},
+		Plugins: plugins.Plugins{
+			"org1":       {Plugins: []string{"org-plugin"}},
+			"org1/repo1": {Plugins: []string{"repo-plugin1", "no-help-plugin"}},
+			"org1/repo2": {Plugins: []string{"repo-plugin1", "repo-plugin2"}},
+			"org2/repo1": {Plugins: []string{"repo-plugin3"}},
 		},
 		ExternalPlugins: map[string][]plugins.ExternalPlugin{
 			"org1/repo1": {
@@ -140,7 +141,7 @@ func TestGeneratePluginHelp(t *testing.T) {
 
 	help := NewHelpAgent(fpa, fghc).GeneratePluginHelp()
 	if help == nil {
-		t.Fatal("HelpAgent returned nil Help struct pointer.")
+		t.Fatal("NewHelpAgent returned nil HelpAgent struct pointer.")
 	}
 	if got, expected := sets.NewString(help.AllRepos...), sets.NewString(expectedAllRepos...); !got.Equal(expected) {
 		t.Errorf("Expected 'AllRepos' to be %q, but got %q.", expected.List(), got.List())
@@ -181,8 +182,8 @@ func TestGeneratePluginHelp(t *testing.T) {
 func registerNormalPlugins(t *testing.T, pluginsToEvents map[string][]string, pluginHelp map[string]pluginhelp.PluginHelp, expectedRepos map[string][]string) {
 	for plugin, events := range pluginsToEvents {
 		plugin := plugin
-		helpProvider := func(_ *plugins.Configuration, enabledRepos []string) (*pluginhelp.PluginHelp, error) {
-			if got, expected := sets.NewString(enabledRepos...), sets.NewString(expectedRepos[plugin]...); !got.Equal(expected) {
+		helpProvider := func(_ *plugins.Configuration, enabledRepos []prowconfig.OrgRepo) (*pluginhelp.PluginHelp, error) {
+			if got, expected := sets.NewString(prowconfig.OrgReposToStrings(enabledRepos)...), sets.NewString(expectedRepos[plugin]...); !got.Equal(expected) {
 				t.Errorf("Plugin '%s' expected to be enabled on repos %q, but got %q.", plugin, expected.List(), got.List())
 			}
 			help := pluginHelp[plugin]

@@ -1,3 +1,16 @@
+# See the OWNERS docs at https://go.k8s.io/owners
+
+reviewers:
+- release-engineering-reviewers
+- justaugustus
 approvers:
+- release-engineering-approvers
+- justaugustus
+emeritus_approvers:
+- Katharine
 - krzyzacy
 - yguo0905
+
+labels:
+- sig/release
+- area/release-eng

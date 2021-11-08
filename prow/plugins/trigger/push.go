@@ -17,58 +17,77 @@ limitations under the License.
 package trigger
 
 import (
+	"context"
+
+	prowapi "k8s.io/test-infra/prow/apis/prowjobs/v1"
+	"k8s.io/test-infra/prow/config"
 	"k8s.io/test-infra/prow/github"
-	"k8s.io/test-infra/prow/kube"
 	"k8s.io/test-infra/prow/pjutil"
 )
 
-func listPushEventChanges(pe github.PushEvent) []string {
-	changed := make(map[string]bool)
-	for _, commit := range pe.Commits {
-		for _, added := range commit.Added {
-			changed[added] = true
+func listPushEventChanges(pe github.PushEvent) config.ChangedFilesProvider {
+	return func() ([]string, error) {
+		changed := make(map[string]bool)
+		for _, commit := range pe.Commits {
+			for _, added := range commit.Added {
+				changed[added] = true
+			}
+			for _, removed := range commit.Removed {
+				changed[removed] = true
+			}
+			for _, modified := range commit.Modified {
+				changed[modified] = true
+			}
 		}
-		for _, removed := range commit.Removed {
-			changed[removed] = true
+		var changedFiles []string
+		for file := range changed {
+			changedFiles = append(changedFiles, file)
 		}
-		for _, modified := range commit.Modified {
-			changed[modified] = true
-		}
+		return changedFiles, nil
 	}
-	changedFiles := []string{}
-	for file := range changed {
-		changedFiles = append(changedFiles, file)
-	}
-	return changedFiles
 }
 
-func handlePE(c client, pe github.PushEvent) error {
-	if pe.Deleted {
+func createRefs(pe github.PushEvent) prowapi.Refs {
+	return prowapi.Refs{
+		Org:      pe.Repo.Owner.Name,
+		Repo:     pe.Repo.Name,
+		RepoLink: pe.Repo.HTMLURL,
+		BaseRef:  pe.Branch(),
+		BaseSHA:  pe.After,
+		BaseLink: pe.Compare,
+	}
+}
+
+func handlePE(c Client, pe github.PushEvent) error {
+	if pe.Deleted || pe.After == "0000000000000000000000000000000000000000" {
 		// we should not trigger jobs for a branch deletion
 		return nil
 	}
-	for _, j := range c.Config.Postsubmits[pe.Repo.FullName] {
-		if !j.RunsAgainstBranch(pe.Branch()) {
+
+	org := pe.Repo.Owner.Login
+	repo := pe.Repo.Name
+
+	shaGetter := func() (string, error) {
+		return pe.After, nil
+	}
+
+	postsubmits := getPostsubmits(c.Logger, c.GitClient, c.Config, org+"/"+repo, shaGetter)
+
+	for _, j := range postsubmits {
+		if shouldRun, err := j.ShouldRun(pe.Branch(), listPushEventChanges(pe)); err != nil {
+			return err
+		} else if !shouldRun {
 			continue
 		}
-		changedFiles := listPushEventChanges(pe)
-		if !j.RunsAgainstChanges(changedFiles) {
-			continue
-		}
-		kr := kube.Refs{
-			Org:     pe.Repo.Owner.Name,
-			Repo:    pe.Repo.Name,
-			BaseRef: pe.Branch(),
-			BaseSHA: pe.After,
-		}
+		refs := createRefs(pe)
 		labels := make(map[string]string)
 		for k, v := range j.Labels {
 			labels[k] = v
 		}
 		labels[github.EventGUID] = pe.GUID
-		pj := pjutil.NewProwJob(pjutil.PostsubmitSpec(j, kr), labels)
+		pj := pjutil.NewProwJob(pjutil.PostsubmitSpec(j, refs), labels, j.Annotations)
 		c.Logger.WithFields(pjutil.ProwJobFields(&pj)).Info("Creating a new prowjob.")
-		if _, err := c.KubeClient.CreateProwJob(pj); err != nil {
+		if err := createWithRetry(context.TODO(), c.ProwJobClient, &pj); err != nil {
 			return err
 		}
 	}

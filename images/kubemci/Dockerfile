@@ -12,18 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM gcr.io/k8s-testimages/kubekins-e2e:latest-master
-LABEL maintainer "nikhiljindal@google.com"
+FROM gcr.io/k8s-staging-test-infra/kubekins-e2e:latest-master
 
 RUN apt-get update && apt-get install -y \
     git && \
-    apt-get clean
+    rm -rf /var/lib/apt/lists/*
 
 # Build latest kubemci from HEAD.
 RUN cd /${GOPATH}/src && \
     mkdir -p github.com/GoogleCloudPlatform && \
     cd github.com/GoogleCloudPlatform && \
-    git clone https://github.com/GoogleCloudPlatform/k8s-multicluster-ingress.git && \
+    git clone --depth 1 https://github.com/GoogleCloudPlatform/k8s-multicluster-ingress.git && \
     cd k8s-multicluster-ingress && \
     make build && \
     cp kubemci /bin && \

@@ -20,7 +20,7 @@ import (
 	"fmt"
 
 	"github.com/golang/glog"
-	"k8s.io/test-infra/prow/errorutil"
+	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 
 	"k8s.io/test-infra/prow/github"
 )
@@ -137,7 +137,7 @@ func retireAction(origContext, newContext, targetURL string) func(statuses []git
 	stateSuccess := "success"
 	var desc string
 	if newContext == "" {
-		desc = fmt.Sprint("Context retired without replacement.")
+		desc = "Context retired without replacement."
 	} else {
 		desc = fmt.Sprintf("Context retired. Status moved to \"%s\".", newContext)
 	}
@@ -198,28 +198,42 @@ func (m Mode) processStatuses(combStatus *github.CombinedStatus) []github.Status
 	return m.actions(combStatus.Statuses, combStatus.SHA)
 }
 
+type githubClient interface {
+	GetCombinedStatus(org, repo, ref string) (*github.CombinedStatus, error)
+	CreateStatus(org, repo, SHA string, s github.Status) error
+	GetPullRequests(org, repo string) ([]github.PullRequest, error)
+}
+
 // Migrator will search github for PRs with a given context and migrate/retire/move them.
 type Migrator struct {
-	org             string
-	repo            string
+	org  string
+	repo string
+
+	targetBranchFilter func(string) bool
+
 	continueOnError bool
 
-	client *github.Client
+	client githubClient
 	Mode
 }
 
 // New creates a new migrator with specified options and client.
-func New(mode Mode, client *github.Client, org, repo string, continueOnError bool) *Migrator {
+func New(mode Mode, client github.Client, org, repo string, targetBranchFilter func(string) bool, continueOnError bool) *Migrator {
 	return &Migrator{
-		org:             org,
-		repo:            repo,
-		continueOnError: continueOnError,
-		client:          client,
-		Mode:            mode,
+		org:                org,
+		repo:               repo,
+		targetBranchFilter: targetBranchFilter,
+		continueOnError:    continueOnError,
+		client:             client,
+		Mode:               mode,
 	}
 }
 
 func (m *Migrator) processPR(pr github.PullRequest) error {
+	if !m.targetBranchFilter(pr.Base.Ref) {
+		return nil
+	}
+
 	combined, err := m.client.GetCombinedStatus(m.org, m.repo, pr.Head.SHA)
 	if err != nil {
 		return err
@@ -251,5 +265,5 @@ func (m *Migrator) Migrate() error {
 			return err
 		}
 	}
-	return errorutil.NewAggregate(errors...)
+	return utilerrors.NewAggregate(errors)
 }

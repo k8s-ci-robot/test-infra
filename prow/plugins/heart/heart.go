@@ -25,21 +25,19 @@ import (
 
 	"github.com/sirupsen/logrus"
 
+	"k8s.io/test-infra/prow/config"
 	"k8s.io/test-infra/prow/github"
 	"k8s.io/test-infra/prow/pluginhelp"
 	"k8s.io/test-infra/prow/plugins"
+	"k8s.io/test-infra/prow/plugins/ownersconfig"
 )
 
 const (
-	pluginName     = "heart"
-	ownersFilename = "OWNERS"
+	pluginName = "heart"
 )
-
-var mergeRe = regexp.MustCompile(`Automatic merge from submit-queue`)
 
 var reactions = []string{
 	github.ReactionThumbsUp,
-	github.ReactionLaugh,
 	github.ReactionHeart,
 	github.ReactionHooray,
 }
@@ -49,16 +47,27 @@ func init() {
 	plugins.RegisterPullRequestHandler(pluginName, handlePullRequest, helpProvider)
 }
 
-func helpProvider(config *plugins.Configuration, enabledRepos []string) (*pluginhelp.PluginHelp, error) {
+func helpProvider(config *plugins.Configuration, _ []config.OrgRepo) (*pluginhelp.PluginHelp, error) {
 	// The {WhoCanUse, Usage, Examples} fields are omitted because this plugin is not triggered with commands.
+	yamlSnippet, err := plugins.CommentMap.GenYaml(&plugins.Configuration{
+		Heart: plugins.Heart{
+			Adorees:       []string{"alice", "bob"},
+			CommentRegexp: ".*",
+		},
+	})
+	if err != nil {
+		logrus.WithError(err).Warnf("cannot generate comments for %s plugin", pluginName)
+	}
 	return &pluginhelp.PluginHelp{
-			Description: "The heart plugin celebrates certain Github actions with the reaction emojis. Emojis are added to merge notifications left by mungegithub's submit-queue and to pull requests that make additions to OWNERS files.",
+			Description: "The heart plugin celebrates certain GitHub actions with the reaction emojis. Emojis are added to pull requests that make additions to OWNERS or OWNERS_ALIASES files and to comments left by specified \"adorees\".",
 			Config: map[string]string{
 				"": fmt.Sprintf(
-					"The heart plugin is configured to react to merge notifications left by the following Github users: %s.",
+					"The heart plugin is configured to react to comments,  satisfying the regular expression %s, left by the following GitHub users: %s.",
+					config.Heart.CommentRegexp,
 					strings.Join(config.Heart.Adorees, ", "),
 				),
 			},
+			Snippet: yamlSnippet,
 		},
 		nil
 }
@@ -82,14 +91,17 @@ func getClient(pc plugins.Agent) client {
 }
 
 func handleIssueComment(pc plugins.Agent, ic github.IssueCommentEvent) error {
-	return handleIC(getClient(pc), pc.PluginConfig.Heart.Adorees, ic)
+	if (pc.PluginConfig.Heart.Adorees == nil || len(pc.PluginConfig.Heart.Adorees) == 0) || len(pc.PluginConfig.Heart.CommentRegexp) == 0 {
+		return nil
+	}
+	return handleIC(getClient(pc), pc.PluginConfig.Heart.Adorees, pc.PluginConfig.Heart.CommentRe, ic)
 }
 
 func handlePullRequest(pc plugins.Agent, pre github.PullRequestEvent) error {
-	return handlePR(getClient(pc), pre)
+	return handlePR(getClient(pc), pre, pc.PluginConfig.OwnersFilenames)
 }
 
-func handleIC(c client, adorees []string, ic github.IssueCommentEvent) error {
+func handleIC(c client, adorees []string, commentRe *regexp.Regexp, ic github.IssueCommentEvent) error {
 	// Only consider new comments on PRs.
 	if !ic.Issue.IsPullRequest() || ic.Action != github.IssueCommentActionCreated {
 		return nil
@@ -105,7 +117,7 @@ func handleIC(c client, adorees []string, ic github.IssueCommentEvent) error {
 		return nil
 	}
 
-	if !mergeRe.MatchString(ic.Comment.Body) {
+	if !commentRe.MatchString(ic.Comment.Body) {
 		return nil
 	}
 
@@ -117,7 +129,7 @@ func handleIC(c client, adorees []string, ic github.IssueCommentEvent) error {
 		reactions[rand.Intn(len(reactions))])
 }
 
-func handlePR(c client, pre github.PullRequestEvent) error {
+func handlePR(c client, pre github.PullRequestEvent, resolver ownersconfig.Resolver) error {
 	// Only consider newly opened PRs
 	if pre.Action != github.PullRequestActionOpened {
 		return nil
@@ -134,7 +146,8 @@ func handlePR(c client, pre github.PullRequestEvent) error {
 	// Smile at any change that adds to OWNERS files
 	for _, change := range changes {
 		_, filename := filepath.Split(change.Filename)
-		if filename == ownersFilename && change.Additions > 0 {
+		filenames := resolver(org, repo)
+		if (filename == filenames.Owners || filename == filenames.OwnersAliases) && change.Additions > 0 {
 			c.Logger.Info("Adding new OWNERS makes me happy!")
 			return c.GitHubClient.CreateIssueReaction(
 				pre.PullRequest.Base.Repo.Owner.Login,

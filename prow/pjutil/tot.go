@@ -25,8 +25,8 @@ import (
 	"path"
 	"time"
 
+	prowapi "k8s.io/test-infra/prow/apis/prowjobs/v1"
 	"k8s.io/test-infra/prow/config"
-	"k8s.io/test-infra/prow/kube"
 	"k8s.io/test-infra/prow/pod-utils/downwardapi"
 
 	"github.com/bwmarrin/snowflake"
@@ -50,7 +50,7 @@ func init() {
 // of a prow config.
 func PresubmitToJobSpec(pre config.Presubmit) *downwardapi.JobSpec {
 	return &downwardapi.JobSpec{
-		Type: kube.PresubmitJob,
+		Type: prowapi.PresubmitJob,
 		Job:  pre.Name,
 	}
 }
@@ -60,7 +60,7 @@ func PresubmitToJobSpec(pre config.Presubmit) *downwardapi.JobSpec {
 // of a prow config.
 func PostsubmitToJobSpec(post config.Postsubmit) *downwardapi.JobSpec {
 	return &downwardapi.JobSpec{
-		Type: kube.PostsubmitJob,
+		Type: prowapi.PostsubmitJob,
 		Job:  post.Name,
 	}
 }
@@ -70,7 +70,7 @@ func PostsubmitToJobSpec(post config.Postsubmit) *downwardapi.JobSpec {
 // of a prow config.
 func PeriodicToJobSpec(periodic config.Periodic) *downwardapi.JobSpec {
 	return &downwardapi.JobSpec{
-		Type: kube.PeriodicJob,
+		Type: prowapi.PeriodicJob,
 		Job:  periodic.Name,
 	}
 }
@@ -84,7 +84,7 @@ func GetBuildID(name, totURL string) (string, error) {
 	var err error
 	url, err := url.Parse(totURL)
 	if err != nil {
-		return "", fmt.Errorf("invalid tot url: %v", err)
+		return "", fmt.Errorf("invalid tot url: %w", err)
 	}
 	url.Path = path.Join(url.Path, "vend", name)
 	sleepDuration := 100 * time.Millisecond
@@ -100,7 +100,7 @@ func GetBuildID(name, totURL string) (string, error) {
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode != 200 {
-			err = fmt.Errorf("got unexpected response from tot: %v", resp.Status)
+			err = fmt.Errorf("got unexpected response from tot: %s", resp.Status)
 			continue
 		}
 		var buf []byte

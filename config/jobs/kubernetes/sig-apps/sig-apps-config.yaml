@@ -1,39 +1,4 @@
 periodics:
-- interval: 2h
-  name: application-periodic-default-gke
-  labels:
-    preset-service-account: "true"
-    preset-k8s-ssh: "true"
-    preset-dind-enabled: "true"
-  spec:
-    containers:
-    - image: gcr.io/k8s-testimages/kubekins-e2e:v20181129-33929460d-master
-      args:
-      - --repo=github.com/kubernetes-sigs/application=master
-      - --upload=gs://kubernetes-jenkins/logs/
-      - --timeout=150
-      - --scenario=kubernetes_e2e
-      - --
-      - --check-leaked-resources
-      - --cluster=
-      - --deployment=gke
-      - --extract=gke
-      - --gcp-node-image=gci
-      - --gcp-zone=us-central1-f
-      - --gke-environment=prod
-      - --provider=gke
-      - --test=false
-      - --test-cmd=../e2e/e2e-prow.sh
-      - --test-cmd-name=application-e2e
-      - --timeout=120m
-      # docker-in-docker needs privileged mode
-      securityContext:
-        privileged: true
-      resources:
-        requests:
-          cpu: 6
-          memory: "8Gi"
-
 - interval: 30m
   name: ci-kubernetes-e2e-gce-taint-evict
   labels:
@@ -50,13 +15,16 @@ periodics:
       - --env=CONTROLLER_MANAGER_TEST_ARGS=--feature-gates=TaintBasedEvictions=true --enable-taint-manager=true
       - --extract=ci/latest
       - --gcp-node-image=gci
-      - --gcp-zone=us-central1-f
+      - --gcp-zone=us-west1-b
       - --provider=gce
       - --test_args=--ginkgo.focus=\[Feature:TaintEviction\] --minStartupPods=8
       - --timeout=50m
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20181129-33929460d-master
+      image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20211108-d0d3c6d7a8-master
 
 
+  annotations:
+    testgrid-dashboards: google-gce
+    testgrid-tab-name: gce-taint-evict
 - interval: 30m
   name: ci-kubernetes-e2e-gci-gce-statefulset
   labels:
@@ -71,8 +39,11 @@ periodics:
       - --
       - --extract=ci/latest
       - --gcp-node-image=gci
-      - --gcp-zone=us-central1-f
+      - --gcp-zone=us-west1-b
       - --provider=gce
       - --test_args=--ginkgo.focus=\[Feature:StatefulSet\] --minStartupPods=8
       - --timeout=90m
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20181129-33929460d-master
+      image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20211108-d0d3c6d7a8-master
+  annotations:
+    testgrid-dashboards: google-gce
+    testgrid-tab-name: gci-gce-statefulset

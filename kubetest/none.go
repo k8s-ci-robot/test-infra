@@ -38,7 +38,8 @@ func (n noneDeploy) IsUp() error {
 }
 
 func (n noneDeploy) DumpClusterLogs(localPath, gcsPath string) error {
-	return defaultDumpClusterLogs(localPath, gcsPath)
+	log.Print("Noop DumpClusterLogs()")
+	return nil
 }
 
 func (n noneDeploy) TestSetup() error {
@@ -55,7 +56,7 @@ func (n noneDeploy) GetClusterCreated(gcpProject string) (time.Time, error) {
 	return time.Time{}, errors.New("not implemented")
 }
 
-func (_ noneDeploy) KubectlCommand() (*exec.Cmd, error) {
+func (n noneDeploy) KubectlCommand() (*exec.Cmd, error) {
 	log.Print("Noop KubectlCommand()")
 	return nil, nil
 }

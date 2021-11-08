@@ -2,6 +2,7 @@
 
 {{define "scripts"}}
 <link rel="stylesheet" href="/static/dialog-polyfill.css">
+<link rel="stylesheet" href="static/plugin-help/prettify.css">
 <script type="text/javascript" src="/static/plugin_help_bundle.min.js"></script>
 <script type="text/javascript" src="plugin-help.js?var=allHelp"></script>
 {{end}}
@@ -12,7 +13,7 @@
     <ul class="noBullets">
       <li>Plugin help for</li>
       <li><select id="repo">
-        <option>All plugins</option>
+        <option>All repos</option>
       </select></li>
     </ul>
   </div>
@@ -32,4 +33,4 @@
 </dialog>
 {{end}}
 
-{{template "page" (settings mobileUnfriendly "plugins" .)}}
+{{template "page" (settings mobileUnfriendly lightMode "plugins" .)}}

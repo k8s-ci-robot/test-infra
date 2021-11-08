@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Copyright 2016 The Kubernetes Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -48,26 +48,16 @@ e2e_args=( \
 # TODO(zmerlynn): This is duplicating some logic in e2e-runner.sh, but
 # I'd rather keep it isolated for now.
 if [[ "${KOPS_DEPLOY_LATEST_KUBE:-}" =~ ^[yY]$ ]]; then
-  readonly KOPS_KUBE_LATEST_URL=${KOPS_DEPLOY_LATEST_URL:-"https://storage.googleapis.com/kubernetes-release-dev/ci/latest.txt"}
+  readonly KOPS_KUBE_LATEST_URL=${KOPS_DEPLOY_LATEST_URL:-"https://storage.googleapis.com/k8s-release-dev/ci/latest.txt"}
   readonly KOPS_KUBE_LATEST=$(curl -fsS --retry 3 "${KOPS_KUBE_LATEST_URL}")
   if [[ -z "${KOPS_KUBE_LATEST}" ]]; then
     echo "Can't fetch kube latest URL" >&2
     exit 1
   fi
-  readonly KOPS_KUBE_RELEASE_URL=${KOPS_KUBE_RELEASE_URL:-"https://storage.googleapis.com/kubernetes-release-dev/ci"}
+  readonly KOPS_KUBE_RELEASE_URL=${KOPS_KUBE_RELEASE_URL:-"https://storage.googleapis.com/k8s-release-dev/ci"}
 
   e2e_args+=(--kops-kubernetes-version="${KOPS_KUBE_RELEASE_URL}/${KOPS_KUBE_LATEST}")
 fi
-
-EXTERNAL_IP=$(curl -SsL -H 'Metadata-Flavor: Google' 'http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip' || true)
-if [[ -z "${EXTERNAL_IP}" ]]; then
-  # Running outside GCE
-  echo
-  echo "WARNING: Getting external IP from instance metadata failed, assuming not running on GCE."
-  echo
-  EXTERNAL_IP=$(curl 'http://v4.ifconfig.co')
-fi
-e2e_args+=(--kops-admin-access="${EXTERNAL_IP}/32")
 
 # Define a custom instance lister for cluster/log-dump/log-dump.sh.
 function log_dump_custom_get_instances() {

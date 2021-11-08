@@ -19,11 +19,12 @@ package main
 import (
 	"errors"
 	"fmt"
-	"k8s.io/test-infra/prow/github"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"k8s.io/test-infra/prow/github"
 )
 
 func TestParseHTMLURL(t *testing.T) {
@@ -92,7 +93,9 @@ func TestMakeQuery(t *testing.T) {
 	cases := []struct {
 		name       string
 		query      string
+		archived   bool
 		closed     bool
+		locked     bool
 		dur        time.Duration
 		expected   []string
 		unexpected []string
@@ -101,15 +104,29 @@ func TestMakeQuery(t *testing.T) {
 		{
 			name:       "basic query",
 			query:      "hello world",
-			expected:   []string{"hello world", "is:open"},
+			expected:   []string{"hello world", "is:open", "archived:false"},
 			unexpected: []string{"updated:", "openhello", "worldis"},
+		},
+		{
+			name:       "basic archived",
+			query:      "hello world",
+			archived:   true,
+			expected:   []string{"hello world", "is:open", "is:unlocked"},
+			unexpected: []string{"archived:false"},
 		},
 		{
 			name:       "basic closed",
 			query:      "hello world",
 			closed:     true,
-			expected:   []string{"hello world"},
+			expected:   []string{"hello world", "archived:false", "is:unlocked"},
 			unexpected: []string{"is:open"},
+		},
+		{
+			name:       "basic locked",
+			query:      "hello world",
+			locked:     true,
+			expected:   []string{"hello world", "is:open", "archived:false"},
+			unexpected: []string{"is:unlocked"},
 		},
 		{
 			name:     "basic duration",
@@ -124,20 +141,47 @@ func TestMakeQuery(t *testing.T) {
 			unexpected: []string{"%", "+"},
 		},
 		{
+			name:     "linebreaks are replaced by whitespaces",
+			query:    "label:foo\nlabel:bar",
+			expected: []string{"label:foo label:bar"},
+		},
+		{
 			name:   "include closed with is:open query errors",
 			query:  "hello is:open",
 			closed: true,
 			err:    true,
 		},
 		{
-			name:  "is:closed without includeClosed",
+			name:     "archived:false with include-archived errors",
+			query:    "hello archived:false",
+			archived: true,
+			err:      true,
+		},
+		{
+			name:  "archived:true without includeArchived errors",
+			query: "hello archived:true",
+			err:   true,
+		},
+		{
+			name:  "is:closed without includeClosed errors",
 			query: "hello is:closed",
 			err:   true,
+		},
+		{
+			name:  "is:locked without includeLocked errors",
+			query: "hello is:locked",
+			err:   true,
+		},
+		{
+			name:   "is:unlocked with includeLocked errors",
+			query:  "hello is:unlocked",
+			locked: true,
+			err:    true,
 		},
 	}
 
 	for _, tc := range cases {
-		actual, err := makeQuery(tc.query, tc.closed, tc.dur)
+		actual, err := makeQuery(tc.query, tc.archived, tc.closed, tc.locked, tc.dur)
 		if err != nil && !tc.err {
 			t.Errorf("%s: unexpected error: %v", tc.name, err)
 		} else if err == nil && tc.err {
@@ -270,7 +314,7 @@ func TestRun(t *testing.T) {
 	for _, tc := range cases {
 		ignoreSorting := ""
 		ignoreOrder := false
-		err := run(&tc.client, tc.query, ignoreSorting, ignoreOrder, makeCommenter(tc.comment, tc.template), tc.ceiling)
+		err := run(&tc.client, tc.query, ignoreSorting, ignoreOrder, false, makeCommenter(tc.comment, tc.template), tc.ceiling)
 		if tc.err && err == nil {
 			t.Errorf("%s: failed to received an error", tc.name)
 			continue

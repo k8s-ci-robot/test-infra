@@ -1,2 +1,12 @@
+# See the OWNERS docs at https://go.k8s.io/owners
+
+reviewers:
+- amwat
+- chaodaiG
+- fejta
+approvers:
+- amwat
+emeritus_approvers:
+- krzyzacy
 labels:
- - area/prow/gerrit
+- area/prow/gerrit
