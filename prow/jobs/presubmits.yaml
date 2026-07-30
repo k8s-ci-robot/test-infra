@@ -1,0 +1,32 @@
+presubmits:
+  jlynn8599-sketch/test-infra:
+    - name: pull-test-infra-verify
+      agent: kubernetes
+      always_run: true
+      optional: false
+      decorate: true
+      max_concurrency: 5
+      report: true
+      timeout: 60m
+      labels:
+        preset-service-account: "true"
+      spec:
+        containers:
+          - name: pull-test-infra-verify
+            image: python:3.11-slim
+            command:
+              - /bin/bash
+              - -c
+            args:
+              - |
+                echo "Starting custom validation workflow..."
+                python --version
+                pip install --no-cache-dir -r requirements.txt
+                pytest tests/ --maxfail=1 --disable-warnings -v
+            resources:
+              requests:
+                memory: "1Gi"
+                cpu: "500m"
+              limits:
+                memory: "2Gi"
+                cpu: "1000m"
